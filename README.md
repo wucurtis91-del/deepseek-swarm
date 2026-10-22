@@ -9,11 +9,16 @@ DeepSeek's [Anthropic-compatible endpoint](https://api-docs.deepseek.com/guides/
 small Python script (standard library only) starts them in parallel, collects the results and writes a summary.
 It ships as a Claude Code **skill**, so a Claude session knows when and how to use it.
 
+Each task can carry **acceptance criteria**. When it does, an independent DeepSeek reviewer re-checks the
+result against them and the source files, re-doing every calculation. A result that fails review goes back to a
+worker with the reviewer's notes, up to two times by default.
+
 ```
 Claude (plan) ──► tasks.json ──► swarm.py ──┬─► DeepSeek worker 1 ─► ch1.md
                                             ├─► DeepSeek worker 2 ─► ch2.md
                                             └─► DeepSeek worker N ─► chN.md
 Claude (check + merge) ◄── summary.json ◄───┘
+                     (each worker: produce → review → rework if failed)
 ```
 
 ## Why
@@ -53,15 +58,24 @@ python3 scripts/swarm.py run tasks.json --only ch2,ch5     # rerun selected task
 ```
 
 `tasks.json` holds an optional `shared_context` and a list of tasks with these fields: `id` and `prompt`, plus
-optional `cwd`, `tools` (`none`, `read` by default, `edit` or `bash`), `model`, `max_turns`, `timeout` and
-`add_dirs`. See [SKILL.md](SKILL.md) for details.
+optional `acceptance` (a list of criteria, which turns on review and rework), `cwd`, `tools` (`none`, `read` by
+default, `edit` or `bash`), `model`, `review_model`, `max_turns`, `timeout` and `add_dirs`.
+Useful flags: `--max-rework N`, `--no-review` and `--review-model`. See [SKILL.md](SKILL.md) for details.
 
-Results go to `<tasks>-results/`: one `<id>.md` and `<id>.json` per task, plus a `summary.json` with status, time,
-tokens and an estimated cost based on DeepSeek's published peak and off-peak prices.
+Results go to `<tasks>-results/`: the final `<id>.md` for each task, every round's version and review
+(`<id>.vN.md`, `<id>.vN.review.json`), and a `summary.json` with status, rounds, self-check, review verdict, time and an
+estimated cost based on DeepSeek's published peak and off-peak prices.
+
+## How well does it work?
+
+[One benchmark](benchmarks/2026-10-22-nodal-mesh.md) used a six-question circuits practice paper. With review on,
+the swarm got every numerical answer right, matching Claude working alone, and showed more working. It cost about
+$0.13 and took about four minutes. The reviewers still missed a wording slip, so the planner's final check matters.
+This is one sample, not a general claim.
 
 ## Caveats
 
-- Worker output is a draft. Check it before you rely on it.
+- Worker output is a draft, and a passed review is not proof. Check key results independently.
 - Workers using the `edit` or `bash` tools must not write to the same files.
 - DeepSeek cannot read PDF files; convert them to text first.
 
