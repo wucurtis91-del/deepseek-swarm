@@ -178,6 +178,10 @@ def run_task(task: dict, shared: str, args, claude: str, env: dict, out: Path) -
     # Drop results from an earlier run so a failed rerun never leaves stale output.
     for stale in (out / f"{tid}.md", out / f"{tid}.json"):
         stale.unlink(missing_ok=True)
+    if not cwd.is_dir():
+        rec["error"] = f"工作目录不存在：{cwd}"
+        log(f"[{tid}] 失败：{rec['error']}")
+        return rec
     for attempt in range(1, args.retries + 2):
         rec["attempts"] = attempt
         start = time.time()
