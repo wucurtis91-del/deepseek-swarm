@@ -35,7 +35,7 @@ Claude (check + merge) ◄── summary.json ◄───┘
 ## Install
 
 ```bash
-git clone https://github.com/<you>/deepseek-swarm ~/.claude/skills/deepseek-swarm
+git clone https://github.com/wucurtis91-del/deepseek-swarm ~/.claude/skills/deepseek-swarm
 export DEEPSEEK_API_KEY=sk-...          # skip this if you use CC Switch
 python3 ~/.claude/skills/deepseek-swarm/scripts/swarm.py check
 ```
