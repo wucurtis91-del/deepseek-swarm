@@ -69,9 +69,10 @@ estimated cost based on DeepSeek's published peak and off-peak prices.
 ## How well does it work?
 
 [One benchmark](benchmarks/2026-10-22-nodal-mesh.md) used a six-question circuits practice paper. With review on,
-the swarm got every numerical answer right, matching Claude working alone, and showed more working. It cost about
-$0.13 and took about four minutes. The reviewers still missed a wording slip, so the planner's final check matters.
-This is one sample, not a general claim.
+the swarm got every numerical answer right, matching Claude working alone, and showed more working. DeepSeek cost
+$0.13–0.24 per run. On a task this small, though, the swarm did **not** save money overall: Claude's own planning,
+reading and checking cost about as much as solving it directly. The swarm pays off on input-heavy work where Claude
+only reads summaries. One sample, not a general claim.
 
 ## Caveats
 

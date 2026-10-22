@@ -296,7 +296,8 @@ def run_task(task: dict, shared: str, runner: Runner, out: Path) -> dict:
     model = task.get("model", a.model)
     review_model = task.get("review_model", a.review_model or model)
     do_review = a.review and bool(task.get("acceptance"))
-    rec = {"id": tid, "status": "failed", "rounds": 0, "cost_usd": 0.0, "seconds": 0.0}
+    rec = {"id": tid, "status": "failed", "rounds": 0, "cost_usd": 0.0, "seconds": 0.0,
+           "tokens": {"input": 0, "cache_read": 0, "output": 0}}
     # Drop results from an earlier run so a failed rerun never leaves stale output.
     for stale in out.glob(f"{glob_escape(tid)}.*"):
         stale.unlink()
@@ -307,8 +308,12 @@ def run_task(task: dict, shared: str, runner: Runner, out: Path) -> dict:
         return rec
 
     def spend(res: dict, m: str) -> None:
-        rec["cost_usd"] += estimate_cost(res.get("usage", {}), m, dt.datetime.now(dt.timezone.utc))
+        usage = res.get("usage", {})
+        rec["cost_usd"] += estimate_cost(usage, m, dt.datetime.now(dt.timezone.utc))
         rec["seconds"] += res.get("seconds", 0)
+        rec["tokens"]["input"] += usage.get("input_tokens", 0)
+        rec["tokens"]["cache_read"] += usage.get("cache_read_input_tokens", 0)
+        rec["tokens"]["output"] += usage.get("output_tokens", 0)
 
     def produce(prompt: str) -> dict:
         for attempt in range(a.retries + 1):
@@ -417,6 +422,8 @@ def cmd_run(args) -> int:
         "unverified": [r["id"] for r in merged if r["status"] == "unverified"],
         "failed": [r["id"] for r in merged if r["status"] == "failed"],
         "est_total_cost_usd": round(sum(r.get("cost_usd", 0) for r in merged), 4),
+        "total_tokens": {k: sum(r.get("tokens", {}).get(k, 0) for r in merged)
+                         for k in ("input", "cache_read", "output")},
         "tasks": merged,
     }
     summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2))
