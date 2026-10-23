@@ -25,14 +25,28 @@ description: Offload token-heavy work to several DeepSeek workers running in par
    - **容易误读的约定，自己先核实**（例如看一眼原图），再把核实后的结论写进 `shared_context`。
 3. **拆任务**：拆成 2～20 块互不依赖的子任务。每块的 prompt 要能单独看懂，写清楚
    做什么、读哪些文件、输出什么格式。
+   - **先定每块的 `max_chars`**：按你打算读多少来定，不是按 DeepSeek 想写多少，常用 300～1500。
+     要的是结论就别要过程；要过程就点名哪几步必须写。
+   - **把输出结构和每部分的篇幅写死**，不要只给一个总字数。例如「输出 5 条建议，每条一个标题
+     加 3 行：问题、做法、代价，每行不超过 60 字」。各部分加起来控制在 `max_chars` 的 80% 以内。
+   - 一块内容装不进上限，就再拆成两块，不要放宽上限。
+   - 执行者和复核员的提示词已经要求「多想少说」：推理放在思考里，正文只写结论和关键步骤；
+     复核员每条意见限 30～80 字。这些不用在 prompt 里重复。
 4. **写验收标准（`acceptance`）**：每个任务列 4～10 条，要具体、能逐条判断。
    - 逐条列出每个小问或要点，例如「(b) 求出 V_A、V_B」。
    - 写出容易出错的地方，例如「节点 C 的方程要包含 10 Ω 加 6 V 那条支路」。
-   - 写明格式和篇幅，例如「不超过 800 字」。DeepSeek 默认写得很长。
+   - **篇幅不写进验收标准，用 `max_chars`**。程序会数字数（非空白字符），超了先让执行者压缩，
+     压不下来就直接判不通过，不再花钱请复核员数字数。2026-10-23 的实测里，6 个任务都写了
+     「不超过 1500 字」，交回来的有 2200～3400 字，复核员好几轮都耗在数字数上。
    - 不要把预期答案写进标准里，否则复核就失去了意义。
 5. **运行**：`python3 -I SWARM run tasks.json`。预计超过 2 分钟的话放到后台运行。
 6. **核对**，按这个顺序：
-   - 先看 `summary.json`。`unverified` 表示返工后仍没通过，`failed` 表示调用失败。
+   - 先看 `summary.json`，状态有四种：
+     - `passed`：复核通过。
+     - `unverified`：返工后仍没通过。
+     - `unreviewed`：有结果但没复核。可能是没写 `acceptance`、用了 `--no-review`，或者复核调用
+       重试后仍失败；最后这种同时列在 `review_failed` 里，原因在 `review_error`。这些结果只能当草稿。
+     - `failed`：执行调用失败，没有结果。
    - 再看每个任务的 `selfcheck.uncertain`，这里是最可能出错的地方。
    - 对关键结论做**独立验证**：数值可以用程序重算，事实对照原文，引用逐条查。
    - 通读结果，找复核员容易漏掉的问题：标签和描述错误、前后矛盾、凭空出现的「如图」。
@@ -46,15 +60,20 @@ description: Offload token-heavy work to several DeepSeek workers running in par
 {
   "shared_context": "读者是工科本科生。中文，术语附英文。源文件 paper.tex 给出精确电路。已核实：电压源 + 端在上。",
   "tasks": [
-    {"id": "q1", "prompt": "解第 1 题的 (a)(b)(c)。", "cwd": "/abs/path", "tools": "read",
+    {"id": "q1", "prompt": "解第 1 题的 (a)(b)(c)。每小问先写所用定律，再写方程和结果，不写文字解释。",
+     "cwd": "/abs/path", "tools": "read", "max_chars": 1200,
      "acceptance": ["(a) 给出 R_EQ 及化简过程", "(b) 依次求出 V_B、V_A、V_S，注明所用定律",
-                    "所有数值带单位，且与电路连接一致（复核员要独立求解核对）", "不超过 1500 字"]},
-    {"id": "idea", "prompt": "从成本角度提 3 个方案。", "tools": "none"}
+                    "所有数值带单位，且与电路连接一致（复核员要独立求解核对）"]},
+    {"id": "idea", "prompt": "从成本角度提 3 个方案，每个一行标题加两行理由，每行不超过 50 字。",
+     "tools": "none", "max_chars": 400}
   ]
 }
 ```
 
+任务 id 只能用字母、数字、`_` 和 `-`，因为它会变成结果文件名。
+
 每个任务的可选字段：
+- `max_chars`：正文篇幅上限，按非空白字符计，自查块不算。
 - `acceptance`：有这一项才会进行复核和返工。
 - `cwd`、`tools`、`add_dirs`：工作目录、工具预设、额外允许访问的目录。
 - `model`、`review_model`：执行者和复核员用的模型。
@@ -75,6 +94,10 @@ description: Offload token-heavy work to several DeepSeek workers running in par
 - `--no-review`：跳过复核。只在用户明确要快、不要求质量时使用。
 - `--review-model deepseek-v4-pro`：复核员换用更大的模型。
 - `--only a,b`：只重跑指定的任务。
+- `--max-chars 800`：给没写 `max_chars` 的任务一个默认上限。
+- `--retries 1`：执行和复核调用出错时各自重试几次。复核失败不会占用返工次数。
+- `--max-output-tokens 64000`：每次调用的输出上限，推理也算在内。Claude Code 默认 32000，
+  DeepSeek 想得长时会撞到。
 
 ## 结果
 
@@ -91,7 +114,7 @@ description: Offload token-heavy work to several DeepSeek workers running in par
 
 - **要读的材料多**（很多长文档），而需要的结果短。这正是 DeepSeek 最便宜的地方。
 - **你只读摘要和抽查**：用脚本、`summary.json` 和自查字段来核对，不把每份全文都读进上下文。
-- **给结果设字数上限**：DeepSeek 写得很啰嗦，篇幅越长，你读的成本和复核的成本都越高。
+- **每个任务都设 `max_chars`**：DeepSeek 写得很啰嗦，篇幅越长，你读的成本和复核的成本都越高。
 - **在上下文短的会话里规划**：长会话里每调用一次工具，都要把整个上下文重新读一遍。
 
 用户要的是完成度时，不要为了省钱牺牲核对。但对于小任务，如果自己做更快更省，就直接告诉用户。

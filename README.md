@@ -57,14 +57,23 @@ python3 scripts/swarm.py run examples/tasks.example.json --concurrency 6
 python3 scripts/swarm.py run tasks.json --only ch2,ch5     # rerun selected tasks
 ```
 
-`tasks.json` holds an optional `shared_context` and a list of tasks with these fields: `id` and `prompt`, plus
-optional `acceptance` (a list of criteria, which turns on review and rework), `cwd`, `tools` (`none`, `read` by
-default, `edit` or `bash`), `model`, `review_model`, `max_turns`, `timeout` and `add_dirs`.
-Useful flags: `--max-rework N`, `--no-review` and `--review-model`. See [SKILL.md](SKILL.md) for details.
+`tasks.json` holds an optional `shared_context` and a list of tasks with these fields: `id` (letters, digits, `_`
+and `-`) and `prompt`, plus optional `max_chars` (a length limit), `acceptance` (a list of criteria, which turns on
+review and rework), `cwd`, `tools` (`none`, `read` by default, `edit` or `bash`), `model`, `review_model`,
+`max_turns`, `timeout` and `add_dirs`.
+Useful flags: `--max-rework N`, `--no-review`, `--review-model`, `--max-chars N`, `--retries N` and
+`--max-output-tokens N`. See [SKILL.md](SKILL.md) for details.
+
+**Length is enforced by the script, not the reviewer.** With `max_chars` set, the script counts the result
+(non-whitespace characters). An over-long result goes back to the worker for compression; one that stays too long
+fails the round without a reviewer call. Workers and reviewers are told to think in their reasoning and keep the
+visible output to conclusions and key steps.
 
 Results go to `<tasks>-results/`: the final `<id>.md` for each task, every round's version and review
 (`<id>.vN.md`, `<id>.vN.review.json`), and a `summary.json` with status, rounds, self-check, review verdict, time and an
-estimated cost based on DeepSeek's published peak and off-peak prices.
+estimated cost based on DeepSeek's published peak and off-peak prices. Status is `ok` (passed review), `unverified`
+(still failing after rework), `unreviewed` (no criteria, `--no-review`, or the review call kept failing; the last also
+appears under `review_failed`) or `failed` (no result).
 
 ## How well does it work?
 

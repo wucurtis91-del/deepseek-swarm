@@ -7,10 +7,14 @@ endpoint, and collects every result into an output folder plus a summary.
 
 Quality loop (on by default when a task lists `acceptance` criteria):
   1. a worker produces the result and a short self-check;
-  2. an independent reviewer worker checks it against the acceptance criteria and
+  2. if the task sets `max_chars`, the script counts the result; an over-long one is
+     sent back for compression, and one that stays too long fails without paying a
+     reviewer;
+  3. an independent reviewer worker checks it against the acceptance criteria and
      the source files, re-doing calculations, and returns a pass/fail verdict;
-  3. a failed result goes back to a worker with the reviewer's notes, up to
-     --max-rework times.
+  4. a failed result goes back to a worker with the reviewer's notes, up to
+     --max-rework times. A review that itself fails (API error, unreadable verdict)
+     is retried and never costs a rework round.
 
 Workers run in Claude Code's --bare mode: no CLAUDE.md, memory, hooks, plugins or
 MCP servers are loaded, so nothing personal leaks to the worker and each call starts
@@ -42,6 +46,17 @@ from pathlib import Path
 BASE_URL = "https://api.deepseek.com/anthropic"
 DEFAULT_MODEL = "deepseek-flash"
 
+# Claude Code stops a call at 32000 output tokens by default, and DeepSeek's reasoning
+# counts towards it: in a 2026-10-23 run, 3 of 14 reviews died on that limit.
+DEFAULT_MAX_OUTPUT_TOKENS = 64000
+
+# Task ids become file names in the results folder (<id>.md, <id>.v1.md ...). No dots or
+# slashes, so the stale-file glob "<id>.*" can never match another task's files.
+TASK_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
+
+# How many times an over-long result is sent back for compression before review.
+SHRINK_TRIES = 2
+
 # USD per 1M tokens, peak rates from api-docs.deepseek.com (checked 2026-10-22).
 # Off-peak is half. Only used for a rough estimate in the summary.
 PRICES = {
@@ -62,8 +77,10 @@ WORKER_RULES = """\
 你是并行任务中的一个执行者（worker）。规划者已经把总任务拆开，你只负责下面这一块。
 - 只做你这一块，不要扩展范围，但这一块要做完整：验收标准里的每一条都要满足。
 - 需要的信息先从给定文件里读，不要凭印象。拿不准的地方明确写「不确定」，不要编造。
-- 涉及计算的，写出中间步骤，并在给出结果前自己验算一遍。
-- 直接输出最终结果正文，不要寒暄，不要复述任务。"""
+- 涉及计算的，给出结果前自己验算一遍；正文写关键的中间步骤，验算过程不用写出来。
+- 多想少说：推理、草稿和验算放在思考过程里，正文只写结论和必要的关键步骤。
+  不写过渡句、不复述任务、不加开场白和总结段。
+- 有篇幅上限时必须遵守，宁可删解释也不要超。"""
 
 SELFCHECK_RULES = """\
 正文结束后，另起一行，输出一个自查代码块（规划者会把它从正文里拿掉），格式严格如下：
@@ -77,6 +94,8 @@ REVIEW_RULES = """\
 - 自己从源文件读取信息核对，不要相信结果里的说法；所有计算都独立重算一遍。
 - 指出具体错误：哪一处、错在哪、正确应是什么。不要泛泛而谈。
 - 不要自己重写整份结果。
+- 多想少说：核对过程放在思考里，输出只写结论。每条 note 不超过 30 字，满足的写「符合」即可；
+  errors 最多 8 条，每条不超过 80 字。
 
 最后只输出一个 JSON 代码块，格式严格如下：
 ```json
@@ -90,6 +109,12 @@ REWORK_RULES = """\
 你上一版的结果没有通过独立复核。根据下面的复核意见修改，输出**完整的新版本**
 （不是修改说明，也不是只给改动部分）。复核意见也可能有错：如果你核对源文件后
 确认自己原来是对的，就保留原内容，并在自查块的 uncertain 里写明分歧。"""
+
+SHRINK_RULES = """\
+下面这份结果超过了篇幅上限。把它压缩到上限以内，只输出压缩后的完整正文（不要自查块，不要说明）。
+- 保留：每一条验收标准对应的内容、所有结论和数值、必要的关键步骤。
+- 删掉：重复、过渡句、复述题目、泛泛的解释、开场白和总结段。
+- 不要新增内容，不要改结论。"""
 
 print_lock = threading.Lock()
 
@@ -170,6 +195,8 @@ class Runner:
         self.args = args
         self.claude = find_claude()
         self.env = worker_env(get_key())
+        self.env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = str(
+            getattr(args, "max_output_tokens", DEFAULT_MAX_OUTPUT_TOKENS))
 
     def call(self, prompt: str, task: dict, tools: str, model: str) -> dict:
         """One headless call. Returns {ok, text, usage, turns, seconds, error}."""
@@ -222,13 +249,28 @@ def criteria_block(task: dict) -> str:
     return "## 验收标准（全部满足才算完成）\n" + "\n".join(f"{i}. {c}" for i, c in enumerate(items, 1))
 
 
-def worker_prompt(task: dict, shared: str, prev: str | None = None, review: dict | None = None) -> str:
+def count_chars(text: str) -> int:
+    """Length as the workers are told it is counted: every non-whitespace character."""
+    return len(re.sub(r"\s", "", text))
+
+
+def length_block(limit: int | None) -> str:
+    if not limit:
+        return ""
+    return (f"## 篇幅上限\n正文不超过 {limit} 字（程序按非空白字符计数，自查块不计），"
+            f"目标写到 {int(limit * 0.8)} 字左右。超出会被退回压缩。")
+
+
+def worker_prompt(task: dict, shared: str, prev: str | None = None, review: dict | None = None,
+                  limit: int | None = None) -> str:
     parts = [WORKER_RULES]
     if shared:
         parts.append("## 共同背景\n" + shared.strip())
     parts.append(f"## 你的任务（{task['id']}）\n" + task["prompt"].strip())
     if task.get("acceptance"):
         parts.append(criteria_block(task))
+    if limit:
+        parts.append(length_block(limit))
     if prev is not None:
         parts.append(REWORK_RULES)
         parts.append("## 你上一版的结果\n" + prev)
@@ -237,12 +279,27 @@ def worker_prompt(task: dict, shared: str, prev: str | None = None, review: dict
     return "\n\n".join(parts)
 
 
-def review_prompt(task: dict, shared: str, result: str) -> str:
+def shrink_prompt(task: dict, body: str, limit: int) -> str:
+    n = count_chars(body)
+    target = int(limit * 0.85)
+    parts = [SHRINK_RULES,
+             f"## 篇幅\n现在 {n} 字（非空白字符），上限 {limit} 字。压到 {target} 字左右，"
+             f"也就是删掉大约 {round(100 * (n - target) / n)}%。"]
+    if task.get("acceptance"):
+        parts.append(criteria_block(task))
+    parts.append("## 要压缩的结果\n" + body)
+    return "\n\n".join(parts)
+
+
+def review_prompt(task: dict, shared: str, result: str, limit: int | None = None) -> str:
     parts = [REVIEW_RULES]
     if shared:
         parts.append("## 共同背景（执行者收到的）\n" + shared.strip())
     parts.append("## 执行者收到的任务\n" + task["prompt"].strip())
     parts.append(criteria_block(task))
+    if limit:
+        parts.append(f"## 篇幅\n程序已检查：正文 {count_chars(result)} 字，上限 {limit} 字，符合。"
+                     "涉及字数的验收标准直接判满足，不要自己数字数。")
     parts.append("## 执行者交回的结果\n" + result)
     return "\n\n".join(parts)
 
@@ -262,16 +319,36 @@ def split_selfcheck(text: str) -> tuple[str, dict | None]:
     return text.strip(), None
 
 
+def truthy(value) -> bool:
+    """Only an explicit yes counts. bool("false") is True, so never use bool() here."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "yes", "pass", "passed", "通过", "是")
+    if isinstance(value, (int, float)):
+        return value == 1
+    return False
+
+
 def parse_review(text: str) -> dict:
     blocks = [m.group(2) for m in FENCE.finditer(text) if m.group(1) in (None, "json")]
     for raw in reversed(blocks or [text]):
         try:
             data = json.loads(raw)
-            if isinstance(data, dict) and "pass" in data:
-                data["pass"] = bool(data["pass"])
-                return data
         except ValueError:
             continue
+        if not (isinstance(data, dict) and "pass" in data):
+            continue
+        data["pass"] = truthy(data["pass"])
+        if not isinstance(data.get("errors"), list):
+            data["errors"] = [str(data["errors"])] if data.get("errors") else []
+        # A pass with a criterion marked unmet is a contradiction: treat it as a fail.
+        unmet = [c.get("criterion", "?") for c in data.get("criteria") or []
+                 if isinstance(c, dict) and "met" in c and not truthy(c["met"])]
+        if data["pass"] and unmet:
+            data["pass"] = False
+            data["errors"].append("复核员判了通过，但这些标准写的是未满足：" + "；".join(map(str, unmet)))
+        return data
     return {"pass": False, "errors": ["复核员没有给出可解析的结论"], "fix_instructions": "",
             "unparsed": text[-1500:]}
 
@@ -295,8 +372,10 @@ def run_task(task: dict, shared: str, runner: Runner, out: Path) -> dict:
     tid = task["id"]
     model = task.get("model", a.model)
     review_model = task.get("review_model", a.review_model or model)
+    tools = task.get("tools", a.tools)
+    limit = task.get("max_chars", a.max_chars)
     do_review = a.review and bool(task.get("acceptance"))
-    rec = {"id": tid, "status": "failed", "rounds": 0, "cost_usd": 0.0, "seconds": 0.0,
+    rec = {"id": tid, "status": "failed", "rounds": 0, "shrinks": 0, "cost_usd": 0.0, "seconds": 0.0,
            "tokens": {"input": 0, "cache_read": 0, "output": 0}}
     # Drop results from an earlier run so a failed rerun never leaves stale output.
     for stale in out.glob(f"{glob_escape(tid)}.*"):
@@ -315,34 +394,79 @@ def run_task(task: dict, shared: str, runner: Runner, out: Path) -> dict:
         rec["tokens"]["cache_read"] += usage.get("cache_read_input_tokens", 0)
         rec["tokens"]["output"] += usage.get("output_tokens", 0)
 
-    def produce(prompt: str) -> dict:
-        for attempt in range(a.retries + 1):
-            res = runner.call(prompt, task, task.get("tools", a.tools), model)
-            spend(res, model)
+    def attempt(prompt: str, preset: str, m: str, what: str) -> dict:
+        """One call, retried up to --retries times. Workers and reviewers both go through here."""
+        for i in range(max(a.retries, 0) + 1):
+            if i:
+                time.sleep(min(30, 5 * i))   # give a rate limit (429) a moment to clear
+            res = runner.call(prompt, task, preset, m)
+            spend(res, m)
             if res["ok"]:
                 return res
-            log(f"[{tid}] 调用失败（第 {attempt + 1} 次）：{res['error'][:200]}")
+            log(f"[{tid}] {what}调用失败（第 {i + 1} 次）：{res['error'][:200]}")
         return res
+
+    def fit(body: str) -> str:
+        """Send an over-long result back for compression, so no reviewer pays to read padding."""
+        for i in range(SHRINK_TRIES):
+            if count_chars(body) <= limit:
+                break
+            log(f"[{tid}] 正文 {count_chars(body)} 字，超过上限 {limit}：压缩（第 {i + 1} 次）")
+            res = attempt(shrink_prompt(task, body, limit), "none", model, "压缩")
+            if not res["ok"]:
+                break
+            shorter, _ = split_selfcheck(res["text"])
+            if shorter and count_chars(shorter) < count_chars(body):
+                body = shorter
+                rec["shrinks"] += 1
+        return body
+
+    def get_review(body: str) -> tuple[dict | None, str]:
+        """The reviewer's verdict, or (None, reason) when the call or its JSON kept failing."""
+        why = ""
+        for i in range(max(a.retries, 0) + 1):
+            rres = attempt(review_prompt(task, shared, body, limit), "read", review_model, "复核")
+            if not rres["ok"]:
+                return None, f"复核调用失败：{rres['error'][:300]}"
+            review = parse_review(rres["text"])
+            if "unparsed" not in review:
+                return review, ""
+            why = "复核员没有给出可解析的结论"
+            log(f"[{tid}] {why}，重新复核（第 {i + 1} 次）")
+        return None, why
 
     prev, review = None, None
     for rnd in range(1, a.max_rework + 2):
         rec["rounds"] = rnd
         log(f"[{tid}] 第 {rnd} 轮：执行")
-        res = produce(worker_prompt(task, shared, prev, review))
+        res = attempt(worker_prompt(task, shared, prev, review, limit), tools, model, "执行")
         if not res["ok"]:
             rec["error"] = res["error"]
             break
         body, check = split_selfcheck(res["text"])
+        if limit:
+            body = fit(body)
         (out / f"{tid}.v{rnd}.md").write_text(body)
-        rec.update(selfcheck=check, chars=len(body), error=None)
+        rec.update(selfcheck=check, chars=count_chars(body), error=None)
         if not do_review:
-            rec["status"] = "ok"
+            rec["status"] = "unreviewed"
+            rec["unreviewed_reason"] = "--no-review" if task.get("acceptance") else "没有 acceptance"
             break
-        log(f"[{tid}] 第 {rnd} 轮：复核")
-        rres = runner.call(review_prompt(task, shared, body), task, "read", review_model)
-        spend(rres, review_model)
-        review = parse_review(rres["text"]) if rres["ok"] else {
-            "pass": False, "errors": [f"复核调用失败：{rres['error'][:300]}"], "fix_instructions": ""}
+        if limit and count_chars(body) > limit:
+            # Still too long after compression: fail it here instead of paying a reviewer.
+            review = {"pass": False, "checked_by": "script",
+                      "errors": [f"正文 {count_chars(body)} 字，超过上限 {limit} 字"],
+                      "fix_instructions": f"把正文压到 {limit} 字以内：删掉重复和解释，保留结论和关键步骤。"}
+        else:
+            log(f"[{tid}] 第 {rnd} 轮：复核")
+            review, why = get_review(body)
+            if review is None:
+                # A failed review says nothing about the result: keep it as unreviewed
+                # instead of spending a rework round on it.
+                rec.pop("review", None)
+                rec.update(status="unreviewed", unreviewed_reason="复核失败", review_error=why)
+                log(f"[{tid}] 第 {rnd} 轮没能复核：{why[:200]}")
+                break
         (out / f"{tid}.v{rnd}.review.json").write_text(json.dumps(review, ensure_ascii=False, indent=2))
         rec["review"] = {"pass": review["pass"], "errors": review.get("errors", [])}
         if review["pass"]:
@@ -378,8 +502,12 @@ def load_tasks(path: Path) -> tuple[list[dict], str]:
     ids = set()
     for i, t in enumerate(tasks):
         t.setdefault("id", f"task{i + 1}")
+        if not isinstance(t["id"], str) or not TASK_ID.fullmatch(t["id"]):
+            sys.exit(f"任务 id 只能用字母、数字、_ 和 -，最长 64 个字符：{t['id']!r}")
         if t["id"] in ids:
             sys.exit(f"任务 id 重复：{t['id']}")
+        if "max_chars" in t and not (type(t["max_chars"]) is int and t["max_chars"] > 0):
+            sys.exit(f"任务 {t['id']} 的 max_chars 必须是正整数")
         if "prompt" not in t:
             sys.exit(f"任务 {t['id']} 缺少 prompt")
         if t.get("tools", "read") not in TOOL_PRESETS:
@@ -420,6 +548,8 @@ def cmd_run(args) -> int:
         "wall_seconds": round(time.time() - t0, 1),
         "passed": [r["id"] for r in merged if r["status"] == "ok"],
         "unverified": [r["id"] for r in merged if r["status"] == "unverified"],
+        "unreviewed": [r["id"] for r in merged if r["status"] == "unreviewed"],
+        "review_failed": [r["id"] for r in merged if r.get("review_error")],
         "failed": [r["id"] for r in merged if r["status"] == "failed"],
         "est_total_cost_usd": round(sum(r.get("cost_usd", 0) for r in merged), 4),
         "total_tokens": {k: sum(r.get("tokens", {}).get(k, 0) for r in merged)
@@ -429,7 +559,7 @@ def cmd_run(args) -> int:
     summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2))
     print(json.dumps({k: v for k, v in summary.items() if k != "tasks"}, ensure_ascii=False, indent=2))
     print(f"结果目录：{out}")
-    return 0 if not (summary["failed"] or summary["unverified"]) else 1
+    return 0 if not (summary["failed"] or summary["unverified"] or summary["review_failed"]) else 1
 
 
 def cmd_check(args) -> int:
@@ -462,7 +592,12 @@ def main() -> int:
     r.add_argument("--cwd", help="default working directory for workers")
     r.add_argument("--max-turns", type=int, default=30)
     r.add_argument("--timeout", type=int, default=900, help="seconds per call")
-    r.add_argument("--retries", type=int, default=1, help="retries per call on API/CLI errors")
+    r.add_argument("--retries", type=int, default=1,
+                   help="retries per call on API/CLI errors, for workers and reviewers alike")
+    r.add_argument("--max-chars", type=int,
+                   help="default length limit (non-whitespace characters) for tasks without max_chars")
+    r.add_argument("--max-output-tokens", type=int, default=DEFAULT_MAX_OUTPUT_TOKENS,
+                   help=f"output token cap per call, reasoning included (default: {DEFAULT_MAX_OUTPUT_TOKENS})")
     r.add_argument("--no-review", dest="review", action="store_false",
                    help="skip review even for tasks with acceptance criteria")
     r.add_argument("--max-rework", type=int, default=2,

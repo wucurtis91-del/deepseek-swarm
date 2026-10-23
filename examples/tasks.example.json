@@ -1,13 +1,13 @@
 {
-  "shared_context": "Readers are first-year engineering students. Keep each answer under 200 words.",
+  "shared_context": "Readers are first-year engineering students.",
   "tasks": [
-    {"id": "kvl", "tools": "none",
-     "prompt": "Explain Kirchhoff's Voltage Law and give one short exercise with its worked answer.",
-     "acceptance": ["States the law and what is conserved", "Exercise has numbers and a full worked answer", "The worked answer is arithmetically correct", "Under 200 words"]},
-    {"id": "kcl", "tools": "none",
-     "prompt": "Explain Kirchhoff's Current Law and give one short exercise with its worked answer.",
-     "acceptance": ["States the law and what is conserved", "Exercise has numbers and a full worked answer", "The worked answer is arithmetically correct", "Under 200 words"]},
-    {"id": "notes", "cwd": "~/my-notes", "tools": "read",
-     "prompt": "Read every .txt file in this folder and list the three most important ideas."}
+    {"id": "kvl", "tools": "none", "max_chars": 900,
+     "prompt": "Explain Kirchhoff's Voltage Law in 2 sentences, then give one short exercise (3 lines) and its worked answer (at most 5 lines).",
+     "acceptance": ["States the law and what is conserved", "Exercise has numbers and a full worked answer", "The worked answer is arithmetically correct"]},
+    {"id": "kcl", "tools": "none", "max_chars": 900,
+     "prompt": "Explain Kirchhoff's Current Law in 2 sentences, then give one short exercise (3 lines) and its worked answer (at most 5 lines).",
+     "acceptance": ["States the law and what is conserved", "Exercise has numbers and a full worked answer", "The worked answer is arithmetically correct"]},
+    {"id": "notes", "cwd": "~/my-notes", "tools": "read", "max_chars": 600,
+     "prompt": "Read every .txt file in this folder and list the three most important ideas, one line each, with the file each comes from."}
   ]
 }
