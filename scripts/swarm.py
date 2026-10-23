@@ -56,6 +56,7 @@ import uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from swarmlib import config as _config          # noqa: E402
 from swarmlib import procs as _procs            # noqa: E402
 from swarmlib import security as _security      # noqa: E402
 from swarmlib import util as _util              # noqa: E402
@@ -515,10 +516,8 @@ def estimate_cost(usage: dict, model: str, when: dt.datetime) -> float | None:
     if not isinstance(usage, dict) or usage.get("input_tokens") is None \
             or usage.get("output_tokens") is None:
         return None
-    local = when.astimezone(dt.timezone(dt.timedelta(hours=8)))  # DeepSeek off-peak is 00:30-08:30 Beijing
-    minutes = local.hour * 60 + local.minute
-    off_peak = 30 <= minutes < 8 * 60 + 30
-    factor = 0.5 if off_peak else 1.0
+    # Peak is Mon-Fri 01:00-04:00 and 06:00-10:00 UTC; see DEEPSEEK_PEAK in swarmlib/config.py.
+    factor = _config.peak_factor({"peak": _config.DEEPSEEK_PEAK}, when)
     try:
         return (
             usage.get("input_tokens", 0) * p["in"]

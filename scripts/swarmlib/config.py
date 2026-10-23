@@ -21,22 +21,27 @@ KNOWN_PROVIDERS = {
     },
 }
 
+# DeepSeek peak hours, from api-docs.deepseek.com/quick_start/pricing (read 2026-10-23):
+# Monday to Friday, 01:00-04:00 and 06:00-10:00 UTC. Every other hour, weekends included,
+# is off-peak at half price. Chinese public holidays are off-peak too but are not
+# modelled, so on those days the estimate is the higher peak rate.
+DEEPSEEK_PEAK = {"weekdays": [0, 1, 2, 3, 4], "windows_utc": [["01:00", "04:00"], ["06:00", "10:00"]],
+                 "off_peak_factor": 0.5}
+
 # USD per 1M tokens. Sources and update dates travel with each entry so an
 # estimate can always be traced. Verified 2026-10-23.
 PRICES = {
     "deepseek-flash": {
         "input": 0.30, "cached_input": 0.006, "cache_write": 0.30, "output": 1.20,
         "source": "https://api-docs.deepseek.com/quick_start/pricing (peak rates; off-peak 50%)",
-        "updated": "2026-10-22",
-        "peak": {"utc_offset_hours": 8, "off_peak_start": "00:30", "off_peak_end": "08:30",
-                 "off_peak_factor": 0.5},
+        "updated": "2026-10-23",
+        "peak": DEEPSEEK_PEAK,
     },
     "deepseek-v4-pro": {
         "input": 1.32, "cached_input": 0.044, "cache_write": 1.32, "output": 3.96,
         "source": "https://api-docs.deepseek.com/quick_start/pricing (peak rates; off-peak 50%)",
-        "updated": "2026-10-22",
-        "peak": {"utc_offset_hours": 8, "off_peak_start": "00:30", "off_peak_end": "08:30",
-                 "off_peak_factor": 0.5},
+        "updated": "2026-10-23",
+        "peak": DEEPSEEK_PEAK,
     },
     # Anthropic prices: platform.claude.com/docs/en/about-claude/pricing, read 2026-10-23.
     # Cache-write is the 5-minute rate; 1-hour writes cost more and are not modelled.
@@ -416,11 +421,27 @@ def price_for(model: str, prices: dict | None = None) -> dict | None:
     return entry if isinstance(entry, dict) else None
 
 
-def _peak_factor(price: dict, when: dt.datetime) -> float:
+def _minutes(hhmm: str) -> int:
+    hh, mm = map(int, str(hhmm).split(":"))
+    return hh * 60 + mm
+
+
+def peak_factor(price: dict, when: dt.datetime) -> float:
+    """Price multiplier at `when`: 1.0 inside a peak window, off_peak_factor outside.
+
+    `windows_utc` lists the peak windows on `weekdays` (Monday is 0). The older
+    off_peak_start/off_peak_end form, a single daily off-peak window in a fixed
+    UTC offset, is still read for custom price tables."""
     peak = price.get("peak")
     if not isinstance(peak, dict):
         return 1.0
     try:
+        if "windows_utc" in peak:
+            utc = when.astimezone(dt.timezone.utc)
+            minutes = utc.hour * 60 + utc.minute
+            in_peak = utc.weekday() in peak.get("weekdays", range(7)) and any(
+                _minutes(a) <= minutes < _minutes(b) for a, b in peak["windows_utc"])
+            return 1.0 if in_peak else float(peak.get("off_peak_factor", 0.5))
         offset = int(peak.get("utc_offset_hours", 0))
         local = when.astimezone(dt.timezone(dt.timedelta(hours=offset)))
         hh, mm = map(int, str(peak.get("off_peak_start", "00:30")).split(":"))
@@ -483,7 +504,7 @@ def estimate_cost(usage: dict | None, model: str, when: dt.datetime | None = Non
     if usage == {} or usage is None:
         return {"usd": None, "known": False, "reason": "usage_missing",
                 "price": price, "usage": norm}
-    factor = _peak_factor(price, when)
+    factor = peak_factor(price, when)
     try:
         usd = (
             (norm["input_tokens"] or 0) * float(price.get("input", 0))
