@@ -5,16 +5,21 @@ The planner (you, or a Claude session) writes a tasks file; this script starts o
 headless `claude -p` worker per task, all pointed at DeepSeek's Anthropic-compatible
 endpoint, and collects every result into an output folder plus a summary.
 
-Quality loop (on by default when a task lists `acceptance` criteria):
+Quality loop for each task:
   1. a worker produces the result and a short self-check;
   2. if the task sets `max_chars`, the script counts the result; an over-long one is
      sent back for compression, and one that stays too long fails without paying a
      reviewer;
-  3. an independent reviewer worker checks it against the acceptance criteria and
-     the source files, re-doing calculations, and returns a pass/fail verdict;
-  4. a failed result goes back to a worker with the reviewer's notes, up to
-     --max-rework times. A review that itself fails (API error, unreadable verdict)
-     is retried and never costs a rework round.
+  3. if the task sets `check_cmd` (tests, a linter...), the script runs it; a failing
+     run goes back to the worker with the command's output;
+  4. if the task lists `acceptance` criteria, an independent reviewer worker checks
+     the result against them and the source files, re-doing calculations;
+  5. a failed result goes back to a worker with the notes, up to --max-rework times.
+     A review that itself fails (API error, unreadable verdict) is retried and never
+     costs a rework round.
+
+Tasks file extras: `inputs` turns one task into one task per matching file, and
+`depends_on` makes a task wait for others and see their results.
 
 Workers run in Claude Code's --bare mode: no CLAUDE.md, memory, hooks, plugins or
 MCP servers are loaded, so nothing personal leaks to the worker and each call starts
@@ -22,6 +27,7 @@ from ~1k tokens of overhead instead of tens of thousands.
 
 Usage:
   swarm.py check                         verify the DeepSeek key with one tiny call
+  swarm.py plan TASKS.json [--show ID]   show expanded tasks and their order, no API calls
   swarm.py run TASKS.json [options]      run all tasks in parallel
   swarm.py run TASKS.json --only a,b     rerun selected tasks
 
@@ -32,10 +38,14 @@ from __future__ import annotations
 import argparse
 import concurrent.futures as cf
 import datetime as dt
+import fnmatch
+import glob
 import json
 import os
 import re
+import shlex
 import shutil
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -56,6 +66,20 @@ TASK_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
 
 # How many times an over-long result is sent back for compression before review.
 SHRINK_TRIES = 2
+
+# check_cmd: the planner's command (tests, a linter...) run after each worker round.
+DEFAULT_CHECK_TIMEOUT = 300
+CHECK_OUTPUT_CHARS = 3000          # tail of the command's output sent back to the worker
+
+# depends_on: how much of each upstream result goes straight into the prompt.
+DEFAULT_UPSTREAM_CHARS = 6000
+
+# inputs: an over-broad glob should stop the run, not start hundreds of workers.
+DEFAULT_MAX_TASKS = 50
+PLACEHOLDERS = ("{path}", "{name}", "{stem}", "{i}", "{n}")
+
+# Upstream statuses a dependent task may build on. unverified, failed and blocked may not.
+USABLE = ("ok", "unreviewed")
 
 # USD per 1M tokens, peak rates from api-docs.deepseek.com (checked 2026-10-22).
 # Off-peak is half. Only used for a rough estimate in the summary.
@@ -261,16 +285,42 @@ def length_block(limit: int | None) -> str:
             f"目标写到 {int(limit * 0.8)} 字左右。超出会被退回压缩。")
 
 
+def check_block(task: dict) -> str:
+    if not task.get("check_cmd"):
+        return ""
+    return ("## 检查命令\n你交回后，程序会在工作目录运行下面这条命令，退出码为 0 才算通过；没通过会把输出"
+            "打回给你修改。有 Bash 工具就先自己运行一遍，没有就在交回前仔细核对。\n"
+            f"```\n{task['check_cmd']}\n```")
+
+
+def upstream_block(task: dict, deps: dict, out: Path) -> str:
+    """The results of the tasks this one depends on, each cut to upstream_chars."""
+    cap = task.get("upstream_chars", DEFAULT_UPSTREAM_CHARS)
+    parts = ["## 上游结果（你依赖的任务已经完成，下面是它们交回的正文）"]
+    for dep, status in deps.items():
+        path = out / f"{dep}.md"
+        text = path.read_text() if path.exists() else "（没有结果文件）"
+        if len(text) > cap:
+            text = text[:cap] + f"\n……（已截断，全文在 {path}，需要时用 Read 读取）"
+        note = "" if status == "ok" else "（未经复核，只能当草稿）"
+        parts.append(f"### {dep}{note}\n{text}")
+    return "\n\n".join(parts)
+
+
 def worker_prompt(task: dict, shared: str, prev: str | None = None, review: dict | None = None,
                   limit: int | None = None) -> str:
     parts = [WORKER_RULES]
     if shared:
         parts.append("## 共同背景\n" + shared.strip())
     parts.append(f"## 你的任务（{task['id']}）\n" + task["prompt"].strip())
+    if task.get("_upstream"):
+        parts.append(task["_upstream"])
     if task.get("acceptance"):
         parts.append(criteria_block(task))
     if limit:
         parts.append(length_block(limit))
+    if task.get("check_cmd"):
+        parts.append(check_block(task))
     if prev is not None:
         parts.append(REWORK_RULES)
         parts.append("## 你上一版的结果\n" + prev)
@@ -296,10 +346,14 @@ def review_prompt(task: dict, shared: str, result: str, limit: int | None = None
     if shared:
         parts.append("## 共同背景（执行者收到的）\n" + shared.strip())
     parts.append("## 执行者收到的任务\n" + task["prompt"].strip())
+    if task.get("_upstream"):
+        parts.append(task["_upstream"])
     parts.append(criteria_block(task))
     if limit:
         parts.append(f"## 篇幅\n程序已检查：正文 {count_chars(result)} 字，上限 {limit} 字，符合。"
                      "涉及字数的验收标准直接判满足，不要自己数字数。")
+    if task.get("check_cmd"):
+        parts.append(f"## 检查命令\n程序已运行 `{task['check_cmd']}`，通过（退出码 0）。不用重复这项检查。")
     parts.append("## 执行者交回的结果\n" + result)
     return "\n\n".join(parts)
 
@@ -367,9 +421,39 @@ def estimate_cost(usage: dict, model: str, when: dt.datetime) -> float:
     return cost * factor
 
 
+def run_check(task: dict, cwd: Path, result_path: Path) -> dict:
+    """Run the planner's check_cmd in the task's folder. {result} is this round's result file.
+
+    The command comes from the tasks file Claude wrote, never from a worker, and runs in
+    its own process group so a timeout also stops whatever it started."""
+    cmd = task["check_cmd"].replace("{result}", shlex.quote(str(result_path)))
+    limit = task.get("check_timeout", DEFAULT_CHECK_TIMEOUT)
+    start = time.time()
+    proc = subprocess.Popen(cmd, shell=True, cwd=cwd, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True, start_new_session=True)
+    try:
+        output, _ = proc.communicate(timeout=limit)
+        code = proc.returncode
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:   # it finished just as the timeout hit
+            pass
+        output, _ = proc.communicate()
+        output, code = f"超时（{limit}s），已停止。\n{output or ''}", None
+    return {"pass": code == 0, "exit": code, "seconds": round(time.time() - start, 1),
+            "output": (output or "").strip()[-CHECK_OUTPUT_CHARS:]}
+
+
 def run_task(task: dict, shared: str, runner: Runner, out: Path) -> dict:
     a = runner.args
     tid = task["id"]
+    deps = task.get("_deps") or {}
+    if deps:
+        # Upstream results go into both prompts, and the results folder becomes readable
+        # so a worker can open an upstream result that was cut short.
+        task = {**task, "_upstream": upstream_block(task, deps, out),
+                "add_dirs": [*task.get("add_dirs", []), str(out)]}
     model = task.get("model", a.model)
     review_model = task.get("review_model", a.review_model or model)
     tools = task.get("tools", a.tools)
@@ -446,20 +530,38 @@ def run_task(task: dict, shared: str, runner: Runner, out: Path) -> dict:
         body, check = split_selfcheck(res["text"])
         if limit:
             body = fit(body)
-        (out / f"{tid}.v{rnd}.md").write_text(body)
+        result_path = out / f"{tid}.v{rnd}.md"
+        result_path.write_text(body)
         rec.update(selfcheck=check, chars=count_chars(body), error=None)
-        if not do_review:
-            rec["status"] = "unreviewed"
-            rec["unreviewed_reason"] = ("没有 acceptance" if not task.get("acceptance")
-                                        else "任务设了 review: false" if task.get("review") is False
-                                        else "--no-review")
-            break
+
+        # Cheap checks first: a result that fails them goes straight back, no reviewer paid.
+        review = None
         if limit and count_chars(body) > limit:
-            # Still too long after compression: fail it here instead of paying a reviewer.
             review = {"pass": False, "checked_by": "script",
                       "errors": [f"正文 {count_chars(body)} 字，超过上限 {limit} 字"],
                       "fix_instructions": f"把正文压到 {limit} 字以内：删掉重复和解释，保留结论和关键步骤。"}
-        else:
+        elif task.get("check_cmd"):
+            log(f"[{tid}] 第 {rnd} 轮：运行检查命令")
+            ck = run_check(task, cwd, result_path)
+            rec["check"] = {k: ck[k] for k in ("pass", "exit", "seconds")}
+            if not ck["pass"]:
+                how = "超时" if ck["exit"] is None else f"退出码 {ck['exit']}"
+                review = {"pass": False, "checked_by": "check_cmd",
+                          "errors": [f"检查命令没通过（{how}）：{task['check_cmd']}"],
+                          "check_output": ck["output"],
+                          "fix_instructions": "看 check_output 里的报错，只改你这个任务负责的文件，让检查命令通过。"}
+
+        if review is None and not do_review:
+            if task.get("check_cmd"):
+                rec.update(status="ok", verified_by="check_cmd")
+                log(f"[{tid}] 第 {rnd} 轮检查命令通过")
+            else:
+                rec["status"] = "unreviewed"
+                rec["unreviewed_reason"] = ("没有 acceptance" if not task.get("acceptance")
+                                            else "任务设了 review: false" if task.get("review") is False
+                                            else "--no-review")
+            break
+        if review is None:
             log(f"[{tid}] 第 {rnd} 轮：复核")
             review, why = get_review(body)
             if review is None:
@@ -470,14 +572,15 @@ def run_task(task: dict, shared: str, runner: Runner, out: Path) -> dict:
                 log(f"[{tid}] 第 {rnd} 轮没能复核：{why[:200]}")
                 break
         (out / f"{tid}.v{rnd}.review.json").write_text(json.dumps(review, ensure_ascii=False, indent=2))
-        rec["review"] = {"pass": review["pass"], "errors": review.get("errors", [])}
+        rec["review"] = {"pass": review["pass"], "by": review.get("checked_by", "reviewer"),
+                         "errors": review.get("errors", [])}
         if review["pass"]:
-            rec["status"] = "ok"
+            rec.update(status="ok", verified_by="review+check_cmd" if task.get("check_cmd") else "review")
             log(f"[{tid}] 第 {rnd} 轮复核通过")
             break
-        log(f"[{tid}] 第 {rnd} 轮复核未通过：{len(review.get('errors', []))} 处问题")
+        log(f"[{tid}] 第 {rnd} 轮没通过（{rec['review']['by']}）：{len(review.get('errors', []))} 处问题")
         prev = body
-        rec["status"] = "unverified"   # has a result, but it never passed review
+        rec["status"] = "unverified"   # has a result, but it never passed its checks
 
     # The newest version that was actually produced (a later round may have errored).
     final = next((out / f"{tid}.v{r}.md" for r in range(rec["rounds"], 0, -1)
@@ -497,13 +600,124 @@ def glob_escape(s: str) -> str:
 
 # ---------------------------------------------------------------- commands
 
-def load_tasks(path: Path) -> tuple[list[dict], str]:
+def fill(value, values: dict):
+    """Put file values into every string of a task template. Not str.format: prompts often
+    contain other braces, such as JSON examples."""
+    if isinstance(value, str):
+        for k, v in values.items():
+            value = value.replace(k, v)
+        return value
+    if isinstance(value, list):
+        return [fill(v, values) for v in value]
+    if isinstance(value, dict):
+        return {k: fill(v, values) for k, v in value.items()}
+    return value
+
+
+def expand_inputs(task: dict, default_cwd: str | None) -> list[dict]:
+    """One task per file matched by the task's `inputs` globs, with {path} {name} {stem}
+    {i} {n} filled in. Globs are relative to the task's cwd."""
+    if "inputs" not in task:
+        return [task]
+    pats = [task["inputs"]] if isinstance(task["inputs"], str) else task["inputs"]
+    if not (isinstance(pats, list) and pats and all(isinstance(p, str) for p in pats)):
+        sys.exit(f"任务 {task['id']} 的 inputs 必须是 glob 字符串或字符串列表")
+    base = Path(task.get("cwd") or default_cwd or os.getcwd()).expanduser()
+    files = []
+    for p in pats:
+        p = os.path.expanduser(p)
+        for f in sorted(glob.glob(p if os.path.isabs(p) else str(base / p), recursive=True)):
+            if os.path.isfile(f) and f not in files:
+                files.append(f)
+    if not files:
+        sys.exit(f"任务 {task['id']} 的 inputs 没有匹配到任何文件：{pats}（相对于 {base}）")
+    template = {k: v for k, v in task.items() if k != "inputs"}
+    if not any(ph in template["id"] for ph in PLACEHOLDERS):
+        template["id"] += "-{stem}"
+    tasks, seen = [], set()
+    for i, f in enumerate(files, 1):
+        fp = Path(f)
+        try:
+            rel = str(fp.relative_to(base))
+        except ValueError:
+            rel = str(fp)
+        values = {"{path}": rel, "{name}": fp.name, "{stem}": fp.stem, "{i}": str(i), "{n}": str(len(files))}
+        t = fill(template, values)
+        # Ids become file names: keep them safe, and fall back to the number for names
+        # with no ASCII letters (Chinese file names, say).
+        safe = re.sub(r"[^A-Za-z0-9_-]", "_", fp.stem).strip("_") or str(i)
+        tid = fill(template["id"], {**values, "{stem}": safe, "{name}": safe, "{path}": safe})
+        tid = base_id = re.sub(r"[^A-Za-z0-9_-]", "_", tid)[:64]
+        k = 2
+        while tid in seen:
+            tid = f"{base_id[:60]}-{k}"
+            k += 1
+        t["id"] = tid
+        seen.add(tid)
+        tasks.append(t)
+    return tasks
+
+
+def resolve_deps(tasks: list[dict]) -> None:
+    """Turn each depends_on pattern list ("lec-*" matches every expanded lecture task) into
+    task ids, and refuse unknown names and cycles."""
+    ids = [t["id"] for t in tasks]
+    for t in tasks:
+        pats = t.get("depends_on", [])
+        pats = [pats] if isinstance(pats, str) else pats
+        if not isinstance(pats, list) or not all(isinstance(p, str) for p in pats):
+            sys.exit(f"任务 {t['id']} 的 depends_on 必须是任务 id（可用 * 通配）的列表")
+        deps = []
+        for p in pats:
+            hits = [i for i in ids if i != t["id"] and fnmatch.fnmatchcase(i, p)]
+            if not hits:
+                sys.exit(f"任务 {t['id']} 的 depends_on「{p}」没有匹配到别的任务")
+            deps += [h for h in hits if h not in deps]
+        t["depends_on"] = deps
+    graph = {t["id"]: t["depends_on"] for t in tasks}
+    state: dict[str, int] = {}
+
+    def visit(node: str, path: list[str]) -> None:
+        if state.get(node) == 1:
+            sys.exit("任务依赖成环：" + " → ".join(path + [node]))
+        if state.get(node) == 2:
+            return
+        state[node] = 1
+        for d in graph[node]:
+            visit(d, path + [node])
+        state[node] = 2
+
+    for node in graph:
+        visit(node, [])
+
+
+def layers(tasks: list[dict]) -> dict[str, int]:
+    """Dependency depth of each task: 0 runs first, 1 after its upstream, and so on."""
+    by_id = {t["id"]: t for t in tasks}
+    depth: dict[str, int] = {}
+
+    def d(tid: str) -> int:
+        if tid not in depth:
+            ups = [u for u in by_id[tid].get("depends_on", []) if u in by_id]
+            depth[tid] = 1 + max(map(d, ups)) if ups else 0
+        return depth[tid]
+
+    return {t["id"]: d(t["id"]) for t in tasks}
+
+
+def load_tasks(path: Path, default_cwd: str | None = None,
+               max_tasks: int = DEFAULT_MAX_TASKS) -> tuple[list[dict], str]:
     spec = json.loads(path.read_text())
     tasks = spec["tasks"] if isinstance(spec, dict) else spec
     shared = spec.get("shared_context", "") if isinstance(spec, dict) else ""
-    ids = set()
     for i, t in enumerate(tasks):
         t.setdefault("id", f"task{i + 1}")
+    tasks = [x for t in tasks for x in expand_inputs(t, default_cwd)]
+    if len(tasks) > max_tasks:
+        sys.exit(f"展开后有 {len(tasks)} 个任务，超过上限 {max_tasks}。检查 inputs 的 glob，"
+                 "确实需要就加 --max-tasks。")
+    ids = set()
+    for t in tasks:
         if not isinstance(t["id"], str) or not TASK_ID.fullmatch(t["id"]):
             sys.exit(f"任务 id 只能用字母、数字、_ 和 -，最长 64 个字符：{t['id']!r}")
         if t["id"] in ids:
@@ -518,35 +732,101 @@ def load_tasks(path: Path) -> tuple[list[dict], str]:
             sys.exit(f"任务 {t['id']} 的 acceptance 必须是字符串列表")
         if not isinstance(t.get("review", True), bool):
             sys.exit(f"任务 {t['id']} 的 review 只能是 true 或 false")
+        if "check_cmd" in t and not (isinstance(t["check_cmd"], str) and t["check_cmd"].strip()):
+            sys.exit(f"任务 {t['id']} 的 check_cmd 必须是非空的命令字符串")
+        for key in ("check_timeout", "upstream_chars"):
+            if key in t and not (type(t[key]) is int and t[key] > 0):
+                sys.exit(f"任务 {t['id']} 的 {key} 必须是正整数")
         ids.add(t["id"])
+    resolve_deps(tasks)
     return tasks, shared
 
 
+def blocked_record(tid: str, why: str) -> dict:
+    return {"id": tid, "status": "blocked", "rounds": 0, "shrinks": 0, "cost_usd": 0.0, "seconds": 0.0,
+            "tokens": {"input": 0, "cache_read": 0, "output": 0}, "error": why}
+
+
+def run_all(tasks: list[dict], shared: str, runner: Runner, out: Path, concurrency: int,
+            done: dict[str, dict]) -> dict[str, dict]:
+    """Run tasks as soon as everything they depend on has finished, up to `concurrency` at
+    once. `done` starts with usable records from earlier runs (for --only) and is filled in.
+    A task whose upstream failed is marked blocked and never started."""
+    pending = list(tasks)
+    running: dict[cf.Future, str] = {}
+    with cf.ThreadPoolExecutor(max_workers=concurrency) as pool:
+        while pending or running:
+            moved = True
+            while moved:
+                moved = False
+                for t in list(pending):
+                    deps = t.get("depends_on", [])
+                    if not all(d in done for d in deps):
+                        if any(d not in done and d not in running.values() and
+                               d not in [p["id"] for p in pending] for d in deps):
+                            missing = [d for d in deps if d not in done]
+                            why = "上游不在这次运行里，也没有可用的旧结果：" + "、".join(missing)
+                        else:
+                            continue
+                    else:
+                        bad = [f"{d}（{done[d]['status']}）" for d in deps if done[d]["status"] not in USABLE]
+                        if not bad:
+                            job = {**t, "_deps": {d: done[d]["status"] for d in deps}}
+                            running[pool.submit(run_task, job, shared, runner, out)] = t["id"]
+                            pending.remove(t)
+                            moved = True
+                            continue
+                        why = "上游没完成：" + "、".join(bad)
+                    for stale in out.glob(f"{glob_escape(t['id'])}.*"):
+                        stale.unlink()
+                    done[t["id"]] = blocked_record(t["id"], why)
+                    log(f"[{t['id']}] 跳过：{why}")
+                    pending.remove(t)
+                    moved = True
+            if not running:
+                break
+            finished, _ = cf.wait(running, return_when=cf.FIRST_COMPLETED)
+            for f in finished:
+                done[running.pop(f)] = f.result()
+    for t in pending:   # only reachable if dependencies could never be met
+        done[t["id"]] = blocked_record(t["id"], "上游一直没有完成")
+    return done
+
+
 def cmd_run(args) -> int:
-    tasks, shared = load_tasks(Path(args.tasks))
+    tasks, shared = load_tasks(Path(args.tasks), args.cwd, args.max_tasks)
+    all_ids = [t["id"] for t in tasks]
     if args.only:
         want = set(args.only.split(","))
+        unknown = sorted(want - set(all_ids))
+        if unknown:
+            sys.exit("--only 里这些 id 不存在：" + "、".join(unknown) + "（可以先运行 plan 看展开后的 id）")
         tasks = [t for t in tasks if t["id"] in want]
     if not tasks:
         sys.exit("没有要运行的任务。")
     out = Path(args.out or Path(args.tasks).with_suffix("").as_posix() + "-results").expanduser()
     out.mkdir(parents=True, exist_ok=True)
-    runner = Runner(args)
-
-    reviewed = sum(1 for t in tasks if args.review and t.get("review", True) and t.get("acceptance"))
-    log(f"并行运行 {len(tasks)} 个任务（{reviewed} 个带复核，最多返工 {args.max_rework} 次），"
-        f"最多同时 {args.concurrency} 个，结果写入 {out}")
-    t0 = time.time()
-    with cf.ThreadPoolExecutor(max_workers=args.concurrency) as pool:
-        futs = [pool.submit(run_task, t, shared, runner, out) for t in tasks]
-        records = [f.result() for f in futs]
-
     summary_path = out / "summary.json"
     old = {}
     if args.only and summary_path.exists():
         old = {r["id"]: r for r in json.loads(summary_path.read_text()).get("tasks", [])}
-    old.update({r["id"]: r for r in records})
-    merged = list(old.values())
+    run_ids = {t["id"] for t in tasks}
+    # Upstream tasks left out of an --only rerun count as finished if their old result is
+    # still there.
+    done = {i: r for i, r in old.items()
+            if i not in run_ids and (r["status"] not in USABLE or (out / f"{i}.md").exists())}
+    runner = Runner(args)
+
+    reviewed = sum(1 for t in tasks if args.review and t.get("review", True) and t.get("acceptance"))
+    checked = sum(1 for t in tasks if t.get("check_cmd"))
+    waiting = sum(1 for t in tasks if t.get("depends_on"))
+    log(f"运行 {len(tasks)} 个任务（{reviewed} 个带复核，{checked} 个带检查命令，{waiting} 个要等上游；"
+        f"最多返工 {args.max_rework} 次），最多同时 {args.concurrency} 个，结果写入 {out}")
+    t0 = time.time()
+    done = run_all(tasks, shared, runner, out, args.concurrency, done)
+
+    old.update({i: done[i] for i in run_ids})
+    merged = sorted(old.values(), key=lambda r: all_ids.index(r["id"]) if r["id"] in all_ids else len(all_ids))
     summary = {
         "finished_at": dt.datetime.now().isoformat(timespec="seconds"),
         "wall_seconds": round(time.time() - t0, 1),
@@ -554,6 +834,7 @@ def cmd_run(args) -> int:
         "unverified": [r["id"] for r in merged if r["status"] == "unverified"],
         "unreviewed": [r["id"] for r in merged if r["status"] == "unreviewed"],
         "review_failed": [r["id"] for r in merged if r.get("review_error")],
+        "blocked": [r["id"] for r in merged if r["status"] == "blocked"],
         "failed": [r["id"] for r in merged if r["status"] == "failed"],
         "est_total_cost_usd": round(sum(r.get("cost_usd", 0) for r in merged), 4),
         "total_tokens": {k: sum(r.get("tokens", {}).get(k, 0) for r in merged)
@@ -563,7 +844,34 @@ def cmd_run(args) -> int:
     summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2))
     print(json.dumps({k: v for k, v in summary.items() if k != "tasks"}, ensure_ascii=False, indent=2))
     print(f"结果目录：{out}")
-    return 0 if not (summary["failed"] or summary["unverified"] or summary["review_failed"]) else 1
+    bad = summary["failed"] or summary["unverified"] or summary["review_failed"] or summary["blocked"]
+    return 1 if bad else 0
+
+
+def cmd_plan(args) -> int:
+    """Show what `run` would start, without calling DeepSeek: expanded ids, dependency
+    order, checks and prompt sizes."""
+    tasks, shared = load_tasks(Path(args.tasks), args.cwd, args.max_tasks)
+    if not tasks:
+        sys.exit("任务文件里没有任务。")
+    depth = layers(tasks)
+    print(f"共 {len(tasks)} 个任务，{max(depth.values()) + 1} 层；共同背景 {len(shared)} 字。")
+    for t in sorted(tasks, key=lambda t: depth[t["id"]]):
+        review = "复核" if t.get("acceptance") and t.get("review", True) else "不复核"
+        bits = [f"第 {depth[t['id']] + 1} 层", t["id"], t.get("tools", args.tools), review,
+                f"上限 {t.get('max_chars', args.max_chars) or '无'} 字", f"prompt {len(t['prompt'])} 字"]
+        if t.get("check_cmd"):
+            bits.append(f"检查：{t['check_cmd']}")
+        if t.get("depends_on"):
+            bits.append("等：" + "、".join(t["depends_on"]))
+        print(" | ".join(bits))
+    if args.show:
+        t = next((t for t in tasks if t["id"] == args.show), None)
+        if t is None:
+            sys.exit(f"没有 id 为 {args.show} 的任务")
+        print(f"\n--- {t['id']} 的执行者 prompt（上游结果要到运行时才有）---")
+        print(worker_prompt(t, shared, limit=t.get("max_chars", args.max_chars)))
+    return 0
 
 
 def cmd_check(args) -> int:
@@ -585,21 +893,32 @@ def main() -> int:
     c.add_argument("--model", default=DEFAULT_MODEL)
     c.set_defaults(func=cmd_check)
 
+    def task_options(p: argparse.ArgumentParser) -> None:
+        """Options that change how the tasks file is read, shared by run and plan."""
+        p.add_argument("tasks", help="tasks JSON file")
+        p.add_argument("--tools", default="read", choices=list(TOOL_PRESETS),
+                       help="default tool preset for tasks that do not set one (default: read)")
+        p.add_argument("--cwd", help="default working directory for workers (and for inputs globs)")
+        p.add_argument("--max-chars", type=int,
+                       help="default length limit (non-whitespace characters) for tasks without max_chars")
+        p.add_argument("--max-tasks", type=int, default=DEFAULT_MAX_TASKS,
+                       help=f"refuse to run more tasks than this after inputs expansion (default: {DEFAULT_MAX_TASKS})")
+
+    p = sub.add_parser("plan", help="show expanded tasks and dependency order without calling DeepSeek")
+    task_options(p)
+    p.add_argument("--show", metavar="ID", help="also print the full worker prompt of one task")
+    p.set_defaults(func=cmd_plan)
+
     r = sub.add_parser("run", help="run every task in a tasks file in parallel")
-    r.add_argument("tasks", help="tasks JSON file")
+    task_options(r)
     r.add_argument("--out", help="output folder (default: <tasks>-results next to the file)")
     r.add_argument("--concurrency", type=int, default=6)
     r.add_argument("--model", default=DEFAULT_MODEL)
     r.add_argument("--review-model", help="model for reviewers (default: same as --model)")
-    r.add_argument("--tools", default="read", choices=list(TOOL_PRESETS),
-                   help="default tool preset for tasks that do not set one (default: read)")
-    r.add_argument("--cwd", help="default working directory for workers")
     r.add_argument("--max-turns", type=int, default=30)
     r.add_argument("--timeout", type=int, default=900, help="seconds per call")
     r.add_argument("--retries", type=int, default=1,
                    help="retries per call on API/CLI errors, for workers and reviewers alike")
-    r.add_argument("--max-chars", type=int,
-                   help="default length limit (non-whitespace characters) for tasks without max_chars")
     r.add_argument("--max-output-tokens", type=int, default=DEFAULT_MAX_OUTPUT_TOKENS,
                    help=f"output token cap per call, reasoning included (default: {DEFAULT_MAX_OUTPUT_TOKENS})")
     r.add_argument("--no-review", dest="review", action="store_false",

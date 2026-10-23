@@ -20,7 +20,8 @@ SELFCHECK = '\n```selfcheck\n{"met": [], "not_met": [], "uncertain": []}\n```'
 
 def args(**kw):
     base = dict(model="deepseek-flash", review_model=None, review=True, tools="read", max_chars=None,
-                retries=1, max_rework=2, cwd=None, max_turns=5, timeout=60, keep_sessions=False)
+                retries=1, max_rework=2, cwd=None, max_turns=5, timeout=60, keep_sessions=False,
+                max_tasks=50)
     base.update(kw)
     return types.SimpleNamespace(**base)
 
@@ -268,6 +269,195 @@ class Summary(Base):
         self.assertEqual(sorted(summary["unreviewed"]), ["draft", "flaky"])
         self.assertEqual(summary["review_failed"], ["flaky"])
         self.assertEqual(code, 1)
+
+
+class CheckCmd(Base):
+    def test_passing_check_counts_as_verified(self):
+        r = FakeRunner(args(), worker=[ok("写好了")])
+        rec = swarm.run_task(self.task(acceptance=[], check_cmd="exit 0"), "", r, self.out)
+        self.assertEqual((rec["status"], rec["verified_by"]), ("ok", "check_cmd"))
+        self.assertEqual(rec["check"]["exit"], 0)
+        self.assertEqual(r.count("review"), 0)
+        self.assertIn("## 检查命令", r.calls[0][1])        # the worker knows what will be run
+
+    def test_failing_check_goes_back_with_its_output(self):
+        cmd = "test -f done.flag || { echo 'AssertionError: 2 != 3'; touch done.flag; exit 1; }"
+        r = FakeRunner(args(), worker=[ok("v1"), ok("v2")])
+        rec = swarm.run_task(self.task(acceptance=[], check_cmd=cmd), "", r, self.out)
+        self.assertEqual((rec["status"], rec["rounds"]), ("ok", 2))
+        self.assertIn("AssertionError: 2 != 3", r.calls[1][1])
+        verdict = json.loads((self.out / "q1.v1.review.json").read_text())
+        self.assertEqual(verdict["checked_by"], "check_cmd")
+
+    def test_failing_check_skips_the_reviewer(self):
+        r = FakeRunner(args(max_rework=0), worker=[ok("v1")])
+        rec = swarm.run_task(self.task(check_cmd="exit 3"), "", r, self.out)
+        self.assertEqual(rec["status"], "unverified")
+        self.assertEqual(r.count("review"), 0)
+        self.assertIn("退出码 3", rec["review"]["errors"][0])
+
+    def test_check_then_review(self):
+        r = FakeRunner(args(), worker=[ok("v1")], review=[ok(PASS)])
+        rec = swarm.run_task(self.task(check_cmd="true"), "", r, self.out)
+        self.assertEqual((rec["status"], rec["verified_by"]), ("ok", "review+check_cmd"))
+        self.assertIn("程序已运行", next(p for k, p, _ in r.calls if k == "review"))
+
+    def test_check_timeout_stops_the_command(self):
+        r = FakeRunner(args(max_rework=0), worker=[ok("v1")])
+        t0 = swarm.time.time()
+        rec = swarm.run_task(self.task(acceptance=[], check_cmd="sleep 30", check_timeout=1), "", r, self.out)
+        self.assertLess(swarm.time.time() - t0, 10)
+        self.assertEqual(rec["status"], "unverified")
+        self.assertIsNone(rec["check"]["exit"])
+
+    def test_result_placeholder_points_at_this_round(self):
+        r = FakeRunner(args(), worker=[ok("最终答案：42")])
+        rec = swarm.run_task(self.task(acceptance=[], check_cmd="grep -q 42 {result}"), "", r, self.out)
+        self.assertEqual(rec["status"], "ok")
+
+
+class Inputs(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        base = Path(self.tmp.name)
+        (base / "lectures").mkdir()
+        for name in ("a.md", "b.md", "第三讲.md"):
+            (base / "lectures" / name).write_text("x")
+
+    def load(self, tasks, **kw):
+        path = Path(self.tmp.name) / "tasks.json"
+        path.write_text(json.dumps({"tasks": tasks}, ensure_ascii=False))
+        return swarm.load_tasks(path, **kw)[0]
+
+    def test_one_task_per_file(self):
+        tasks = self.load([{"id": "lec-{stem}", "inputs": "lectures/*.md", "cwd": self.tmp.name,
+                            "prompt": '总结 {path}（第 {i}/{n} 讲），输出 {"k": 1}',
+                            "acceptance": ["覆盖 {name} 的全部标题"]}])
+        self.assertEqual([t["id"] for t in tasks], ["lec-a", "lec-b", "lec-3"])
+        self.assertEqual(tasks[0]["prompt"], '总结 lectures/a.md（第 1/3 讲），输出 {"k": 1}')
+        self.assertEqual(tasks[2]["acceptance"], ["覆盖 第三讲.md 的全部标题"])
+        self.assertNotIn("inputs", tasks[0])
+
+    def test_id_without_placeholder_gets_the_file_name(self):
+        tasks = self.load([{"id": "sum", "inputs": ["lectures/a.md", "lectures/b.md"],
+                            "cwd": self.tmp.name, "prompt": "p"}])
+        self.assertEqual([t["id"] for t in tasks], ["sum-a", "sum-b"])
+
+    def test_no_match_and_too_many(self):
+        with self.assertRaises(SystemExit):
+            self.load([{"id": "x", "inputs": "nothing/*.md", "cwd": self.tmp.name, "prompt": "p"}])
+        with self.assertRaises(SystemExit):
+            self.load([{"id": "x", "inputs": "lectures/*.md", "cwd": self.tmp.name, "prompt": "p"}],
+                      max_tasks=2)
+
+
+class Depends(LoadTasks):
+    def test_patterns_resolve_to_ids(self):
+        tasks, _ = self.load([{"id": "a-1", "prompt": "p"}, {"id": "a-2", "prompt": "p"},
+                              {"id": "a-merge", "prompt": "p", "depends_on": ["a-*"]}])
+        self.assertEqual(tasks[2]["depends_on"], ["a-1", "a-2"])     # never itself
+
+    def test_unknown_and_cycles_are_refused(self):
+        with self.assertRaises(SystemExit):
+            self.load([{"id": "a", "prompt": "p", "depends_on": ["nope"]}])
+        with self.assertRaises(SystemExit):
+            self.load([{"id": "a", "prompt": "p", "depends_on": ["b"]},
+                       {"id": "b", "prompt": "p", "depends_on": ["c"]},
+                       {"id": "c", "prompt": "p", "depends_on": ["a"]}])
+
+    def test_layers(self):
+        tasks, _ = self.load([{"id": "a", "prompt": "p"}, {"id": "b", "prompt": "p", "depends_on": ["a"]},
+                              {"id": "c", "prompt": "p", "depends_on": ["a", "b"]}])
+        self.assertEqual(swarm.layers(tasks), {"a": 0, "b": 1, "c": 2})
+
+
+class Scheduling(Base):
+    def write(self, tasks):
+        path = self.out / "tasks.json"
+        for t in tasks:
+            t.setdefault("cwd", self.tmp.name)
+        path.write_text(json.dumps({"tasks": tasks}, ensure_ascii=False))
+        return path
+
+    def run_cmd(self, path, failing=(), **kw):
+        calls = []
+
+        class Scripted(FakeRunner):
+            def call(self, prompt, task, tools, model):
+                calls.append((task["id"], prompt))
+                if task["id"] in failing:
+                    return err()
+                return ok(f"结果-{task['id']}")
+
+        a = args(**{"tasks": str(path), "only": None, "out": None, "concurrency": 4, **kw})
+        with mock.patch.object(swarm, "Runner", lambda _a: Scripted(_a)), mock.patch("builtins.print"):
+            code = swarm.cmd_run(a)
+        summary = json.loads((self.out / "tasks-results" / "summary.json").read_text())
+        return code, summary, calls
+
+    def test_downstream_waits_and_sees_upstream(self):
+        path = self.write([{"id": "a1", "prompt": "p"}, {"id": "a2", "prompt": "p"},
+                           {"id": "merge", "prompt": "合并", "depends_on": ["a*"]}])
+        code, summary, calls = self.run_cmd(path)
+        self.assertEqual(code, 0)
+        self.assertEqual(calls[-1][0], "merge")
+        merge_prompt = calls[-1][1]
+        self.assertIn("## 上游结果", merge_prompt)
+        self.assertIn("结果-a1", merge_prompt)
+        self.assertIn("结果-a2", merge_prompt)
+        self.assertIn("（未经复核，只能当草稿）", merge_prompt)
+
+    def test_failed_upstream_blocks_downstream(self):
+        path = self.write([{"id": "a1", "prompt": "p"}, {"id": "a2", "prompt": "p"},
+                           {"id": "merge", "prompt": "合并", "depends_on": ["a1", "a2"]},
+                           {"id": "after", "prompt": "p", "depends_on": ["merge"]}])
+        code, summary, calls = self.run_cmd(path, failing={"a1"})
+        self.assertEqual(code, 1)
+        self.assertEqual(summary["failed"], ["a1"])
+        self.assertEqual(summary["blocked"], ["merge", "after"])
+        self.assertNotIn("merge", [c[0] for c in calls])
+
+    def test_only_rerun_reuses_finished_upstream(self):
+        path = self.write([{"id": "a1", "prompt": "p"}, {"id": "merge", "prompt": "合并", "depends_on": ["a1"]}])
+        self.run_cmd(path)
+        code, summary, calls = self.run_cmd(path, only="merge")
+        self.assertEqual(code, 0)
+        self.assertEqual([c[0] for c in calls], ["merge"])
+        self.assertIn("结果-a1", calls[0][1])
+        self.assertEqual([t["id"] for t in summary["tasks"]], ["a1", "merge"])
+
+    def test_long_upstream_is_cut(self):
+        (self.out / "up.md").write_text("字" * 50)
+        block = swarm.upstream_block({"upstream_chars": 10}, {"up": "ok"}, self.out)
+        self.assertIn("已截断", block)
+        self.assertNotIn("字" * 11, block)
+
+    def test_unknown_only_id_is_refused(self):
+        path = self.write([{"id": "a1", "prompt": "p"}])
+        with self.assertRaises(SystemExit):
+            self.run_cmd(path, only="a9")
+
+
+class Plan(unittest.TestCase):
+    def test_plan_lists_layers_without_calling_anyone(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "tasks.json"
+            path.write_text(json.dumps({"tasks": [
+                {"id": "a", "prompt": "p", "check_cmd": "pytest -q"},
+                {"id": "b", "prompt": "p", "depends_on": ["a"], "max_chars": 300}]}))
+            a = types.SimpleNamespace(tasks=str(path), cwd=None, tools="read", max_chars=None,
+                                      max_tasks=50, show="b")
+            lines = []
+            with mock.patch.object(swarm, "Runner", side_effect=AssertionError("no API in plan")), \
+                 mock.patch("builtins.print", lambda *x, **k: lines.append(" ".join(map(str, x)))):
+                self.assertEqual(swarm.cmd_plan(a), 0)
+        text = "\n".join(lines)
+        self.assertIn("2 层", text)
+        self.assertIn("第 1 层 | a", text)
+        self.assertIn("检查：pytest -q", text)
+        self.assertIn("第 2 层 | b", text)
+        self.assertIn("不超过 300 字", text)        # --show printed b's prompt
 
 
 if __name__ == "__main__":

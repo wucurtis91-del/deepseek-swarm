@@ -53,6 +53,7 @@ tells Claude how to split the work, run it, check the results and merge them.
 To run it by hand:
 
 ```bash
+python3 scripts/swarm.py plan tasks.json                   # expanded tasks and their order, no API calls
 python3 scripts/swarm.py run examples/tasks.example.json --concurrency 6
 python3 scripts/swarm.py run tasks.json --only ch2,ch5     # rerun selected tasks
 ```
@@ -60,10 +61,21 @@ python3 scripts/swarm.py run tasks.json --only ch2,ch5     # rerun selected task
 `tasks.json` holds an optional `shared_context` and a list of tasks with these fields: `id` (letters, digits, `_`
 and `-`) and `prompt`, plus optional `max_chars` (a length limit), `acceptance` (a list of criteria, which turns on
 review and rework), `review` (`false` skips review but still shows the criteria to the worker; the default for
-open-ended, multi-angle analysis), `cwd`, `tools` (`none`, `read` by default, `edit` or `bash`), `model`, `review_model`,
-`max_turns`, `timeout` and `add_dirs`.
-Useful flags: `--max-rework N`, `--no-review`, `--review-model`, `--max-chars N`, `--retries N` and
-`--max-output-tokens N`. See [SKILL.md](SKILL.md) for details.
+open-ended, multi-angle analysis), `check_cmd` (a command such as a test run, executed after every round; a failure
+goes back to the worker with its output), `inputs` (globs: one task per matching file, with `{path}`, `{name}`,
+`{stem}`, `{i}` and `{n}` filled in), `depends_on` (task ids, `*` allowed: wait for them and see their results),
+`cwd`, `tools` (`none`, `read` by default, `edit` or `bash`), `model`, `review_model`, `max_turns`, `timeout`,
+`add_dirs`, `check_timeout` and `upstream_chars`.
+Useful flags: `--max-rework N`, `--no-review`, `--review-model`, `--max-chars N`, `--retries N`,
+`--max-output-tokens N` and `--max-tasks N`. See [SKILL.md](SKILL.md) for details, including how to use it for coding.
+
+For code, a typical task writes one test file per module and lets the script run it:
+
+```json
+{"id": "test-{stem}", "inputs": "src/*.py", "cwd": "/abs/repo", "tools": "edit", "max_chars": 300, "review": false,
+ "prompt": "Read {path} and write unit tests in tests/test_{stem}.py.",
+ "check_cmd": "python3 -m unittest tests.test_{stem}"}
+```
 
 **Length is enforced by the script, not the reviewer.** With `max_chars` set, the script counts the result
 (non-whitespace characters). An over-long result goes back to the worker for compression; one that stays too long
@@ -72,9 +84,10 @@ visible output to conclusions and key steps.
 
 Results go to `<tasks>-results/`: the final `<id>.md` for each task, every round's version and review
 (`<id>.vN.md`, `<id>.vN.review.json`), and a `summary.json` with status, rounds, self-check, review verdict, time and an
-estimated cost based on DeepSeek's published peak and off-peak prices. Status is `ok` (passed review), `unverified`
-(still failing after rework), `unreviewed` (no criteria, `--no-review`, or the review call kept failing; the last also
-appears under `review_failed`) or `failed` (no result).
+estimated cost based on DeepSeek's published peak and off-peak prices. Status is `ok` (passed review or
+`check_cmd`; `verified_by` says which), `unverified` (still failing after rework), `unreviewed` (no criteria,
+`review: false`, `--no-review`, or the review call kept failing; the last also appears under `review_failed`),
+`blocked` (an upstream task did not finish) or `failed` (no result).
 
 ## How well does it work?
 
@@ -88,6 +101,9 @@ only reads summaries. One sample, not a general claim.
 
 - Worker output is a draft, and a passed review is not proof. Check key results independently.
 - Workers using the `edit` or `bash` tools must not write to the same files.
+- `check_cmd` runs code the workers wrote (their tests, say) on your machine with your permissions, unsandboxed.
+  Use it in a git-tracked folder with no secrets in it.
+- Workers can read everything in `cwd` and `add_dirs`, and what they read is sent to DeepSeek.
 - DeepSeek cannot read PDF files; convert them to text first.
 
 ## 中文说明

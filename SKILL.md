@@ -1,6 +1,6 @@
 ---
 name: deepseek-swarm
-description: Offload token-heavy work to several DeepSeek workers running in parallel, each checked by an independent DeepSeek reviewer against acceptance criteria and sent back for rework if it fails, while Claude plans, verifies and merges. Use when the user says 用 DeepSeek 并行做 / 让 DeepSeek 干 / 省 token / 多个 DeepSeek 一起想, or asks to split a large reading, summarising, solving, translating, drafting or brainstorming job across cheap parallel workers. Needs Claude Code CLI and a DeepSeek API key (env DEEPSEEK_API_KEY, or a DeepSeek provider saved in CC Switch).
+description: Offload token-heavy work to several DeepSeek workers running in parallel, each checked by an independent DeepSeek reviewer against acceptance criteria and sent back for rework if it fails, while Claude plans, verifies and merges. Use when the user says 用 DeepSeek 并行做 / 让 DeepSeek 干 / 省 token / 多个 DeepSeek 一起想, or asks to split a large reading, summarising, solving, translating, drafting or brainstorming job across cheap parallel workers, or a coding job such as writing tests, reviewing many files or reading an unfamiliar codebase. Needs Claude Code CLI and a DeepSeek API key (env DEEPSEEK_API_KEY, or a DeepSeek provider saved in CC Switch).
 ---
 
 # DeepSeek 并行工作（deepseek-swarm）
@@ -23,8 +23,10 @@ description: Offload token-heavy work to several DeepSeek workers running in par
    - 给执行者**最精确的源文件**。例如有 LaTeX、源代码或原始数据时，就不要只给从 PDF 提取的
      文字（提取时图和结构会丢失）。DeepSeek 读不了 PDF，要先转成文本。
    - **容易误读的约定，自己先核实**（例如看一眼原图），再把核实后的结论写进 `shared_context`。
-3. **拆任务**：拆成 2～20 块互不依赖的子任务。每块的 prompt 要能单独看懂，写清楚
+3. **拆任务**：拆成 2～20 块子任务。每块的 prompt 要能单独看懂，写清楚
    做什么、读哪些文件、输出什么格式。
+   - 同一类活要对很多文件做（每讲一份摘要、每个模块一份测试），写一个带 `inputs` 的模板任务，不要手抄 20 遍。
+   - 有先后关系的（先分章再统稿、先写接口再写实现），用 `depends_on`，不要拆成两个任务文件手动接力。
    - **先定每块的 `max_chars`**：按你打算读多少来定，不是按 DeepSeek 想写多少，常用 300～1500。
      要的是结论就别要过程；要过程就点名哪几步必须写。
    - **把输出结构和每部分的篇幅写死**，不要只给一个总字数。例如「输出 5 条建议，每条一个标题
@@ -43,13 +45,17 @@ description: Offload token-heavy work to several DeepSeek workers running in par
      并按它自查），同时给任务设 `"review": false`。汇总时由你自己抽查关键事实。用户明确要求严格核对时
      才打开复核。依据：2026-10-23 的实测里，6 个角度的头脑风暴有复核时花了 28 分钟、$1.37，
      大部分耗在核对行号和数字数上。
-5. **运行**：`python3 -I SWARM run tasks.json`。预计超过 2 分钟的话放到后台运行。
+5. **预检再运行**：用了 `inputs` 或 `depends_on` 时，先运行 `python3 -I SWARM plan tasks.json`，
+   确认展开后的 id、分层顺序和检查命令都对，这一步不调用 DeepSeek；加 `--show <id>` 可以看某个任务
+   完整的执行者 prompt。然后运行 `python3 -I SWARM run tasks.json`。预计超过 2 分钟的话放到后台运行。
 6. **核对**，按这个顺序：
-   - 先看 `summary.json`，状态有四种：
-     - `passed`：复核通过。
+   - 先看 `summary.json`，状态有五种：
+     - `passed`：通过了复核或检查命令。`verified_by` 写明是哪一种（`review`、`check_cmd` 或两者）。
+       只靠 `check_cmd` 通过的，说明命令通过了，不说明测试本身写得够严。
      - `unverified`：返工后仍没通过。
      - `unreviewed`：有结果但没复核。可能是没写 `acceptance`、任务设了 `"review": false`、用了 `--no-review`，或者复核调用
        重试后仍失败；最后这种同时列在 `review_failed` 里，原因在 `review_error`。这些结果只能当草稿。
+     - `blocked`：依赖的上游任务没完成（`failed`、`unverified` 或 `blocked`），所以没有运行。
      - `failed`：执行调用失败，没有结果。
    - 再看每个任务的 `selfcheck.uncertain`，这里是最可能出错的地方。
    - 对关键结论做**独立验证**：数值可以用程序重算，事实对照原文，引用逐条查。
@@ -84,6 +90,29 @@ description: Offload token-heavy work to several DeepSeek workers running in par
 - `cwd`、`tools`、`add_dirs`：工作目录、工具预设、额外允许访问的目录。
 - `model`、`review_model`：执行者和复核员用的模型。
 - `max_turns`、`timeout`：每次调用的最大轮数和超时秒数。
+- `check_cmd`、`check_timeout`：执行者每交回一版，脚本就在任务的 `cwd` 里运行这条命令（默认最长
+  300 秒）。退出码不是 0 就把输出的最后 3000 字打回给执行者返工，这一轮不请复核员。
+  `{result}` 会被换成这一轮结果文件的路径，例如 `python3 -m json.tool {result}` 检查 JSON 格式。
+  命令只能由你写，DeepSeek 写不了它。
+- `inputs`：一个或几个 glob（相对于 `cwd`），每匹配到一个文件就展开成一个任务。所有字符串字段里的
+  `{path}`（相对路径）、`{name}`（文件名）、`{stem}`（不带扩展名）、`{i}`、`{n}`（第几个、共几个）
+  都会被替换。id 里没有占位符时会自动加上 `-{stem}`；文件名没有英文字母时改用序号。
+  展开后超过 50 个任务就拒绝运行（`--max-tasks` 可以调）。占位符是原样替换的，路径里可能有空格时，
+  在 `check_cmd` 里自己加引号。
+- `depends_on`：要等哪些任务完成，可用 `*` 通配，例如 `["lec-*"]`。上游结果会放进这个任务的 prompt，
+  每份最多 `upstream_chars` 字（默认 6000），超出的部分执行者可以自己去读全文。上游没完成，这个任务
+  就标成 `blocked`。用 `--only` 只重跑下游时，会沿用上游的旧结果；只重跑上游时，下游不会自动重跑。
+
+例子：先给每讲出摘要，再统稿。
+
+```json
+{"tasks": [
+  {"id": "lec-{stem}", "inputs": "notes/*.md", "cwd": "/abs/course", "tools": "read", "max_chars": 500,
+   "review": false, "prompt": "读 {path}（第 {i}/{n} 讲），列 3 个核心概念，每个一行定义加一行例子。"},
+  {"id": "overview", "depends_on": ["lec-*"], "tools": "none", "max_chars": 1200,
+   "prompt": "根据上游的各讲摘要，写一份全课程概念地图：按主题分组，标出各讲之间的先后依赖。"}
+]}
+```
 
 `tools` 预设：
 
@@ -104,12 +133,54 @@ description: Offload token-heavy work to several DeepSeek workers running in par
 - `--retries 1`：执行和复核调用出错时各自重试几次。复核失败不会占用返工次数。
 - `--max-output-tokens 64000`：每次调用的输出上限，推理也算在内。Claude Code 默认 32000，
   DeepSeek 想得长时会撞到。
+- `--max-tasks 50`：`inputs` 展开后最多允许多少个任务。
+
+## 写代码时怎么用
+
+分工：你定接口、拆任务、集成和最终运行；DeepSeek 做读得多、写得多、互不依赖的部分。
+
+适合交出去的：读懂陌生代码库（`read`，每人一个模块，交回短摘要）；代码审查和找 bug（`read`，开复核，
+复核员按源码核对每条 bug 能否触发）；写单元测试、互不依赖的小模块、样板代码、文档和注释（`edit`，
+每人写自己的文件，配 `check_cmd`）；大段日志分析（`read`）；技术选型（`none`，不复核）。
+
+不要交出去的：牵一发动全身的改动（拆开后接口对不上）；要边运行边调试的 bug；架构决策（可以让
+DeepSeek 先列方案）；改几行的小事。
+
+规划要点：
+- **先定接口再派活**：函数签名、数据格式、文件位置、命名风格、语言版本、能不能加依赖，都写进
+  `shared_context`。执行者看不到 CLAUDE.md，项目约定不写就不知道。
+- **一个任务只写自己的文件**。`__init__.py`、路由表、配置这类共用文件留给你最后统一改。
+- **在 git 分支上跑**，跑完看 `git diff`，不满意就还原。
+- **`max_chars` 管交回的文字，不管写进文件的代码**。`edit` 任务把它设成 200～400，只交回
+  「改了哪些文件、做了什么、哪里没把握」。
+- **用 `check_cmd` 跑测试，通常不开复核**：复核员只能读代码，不能运行。检查命令只跑这个任务自己的
+  测试（例如 `python3 -m unittest tests.test_parser`），不要跑整个测试集：并行的其他执行者可能
+  还没写完自己的文件。
+- **先写接口，再并行实现**：用 `depends_on` 让一个执行者先写好接口文件，其他执行者再基于它写实现。
+- **不要把有机密的目录交给执行者**：它能读 `cwd` 和 `add_dirs` 里的文件，读到的内容会发给 DeepSeek。
+  `.env`、密钥、token 所在的目录不要给；需要时复制一份去掉机密的代码。
+- **`check_cmd` 会运行执行者写的代码**：比如它写的测试，会以用户的权限直接在这台电脑上执行，没有沙箱。
+  只在 git 管理、没有机密的目录里用；第一次对某个项目这样用之前，先告诉用户。
+
+```json
+{
+  "shared_context": "Python 3.11，测试用 unittest，不加依赖。只能新建自己那个测试文件，不改其他文件。交回内容只写：新建了哪个文件、覆盖了哪些函数、哪些行为没把握。",
+  "tasks": [
+    {"id": "test-{stem}", "inputs": "src/*.py", "cwd": "/abs/repo", "tools": "edit", "max_chars": 300,
+     "prompt": "读 {path}，在 tests/test_{stem}.py 写单元测试。",
+     "check_cmd": "python3 -m unittest tests.test_{stem}",
+     "acceptance": ["每个公开函数至少 1 个正常用例和 1 个边界用例", "空输入、非法输入都有用例"],
+     "review": false}
+  ]
+}
+```
 
 ## 结果
 
 默认写在任务文件旁边的 `<tasks>-results/` 里：
 - `<id>.md`：最终版本。
-- `<id>.vN.md` 和 `<id>.vN.review.json`：每一轮的版本和复核意见。
+- `<id>.vN.md` 和 `<id>.vN.review.json`：每一轮的版本，以及这一轮没通过的原因（复核员意见、
+  字数检查或检查命令的输出，`checked_by` 写明是哪一种）。
 - `summary.json`：每个任务的状态、轮数、自查、复核结论、耗时和估算费用。费用按 DeepSeek
   官方价格估算，区分高峰和非高峰时段。
 
