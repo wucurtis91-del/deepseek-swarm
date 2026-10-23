@@ -1,0 +1,9 @@
+{
+  "action": "complete",
+  "reason": "Both facts are in the verified artifact.",
+  "evidence": ["ev-0001"],
+  "completion": [
+    {"criterion": "g1", "met": true, "evidence": ["ev-0001"]},
+    {"criterion": "g2", "met": true, "evidence": ["ev-0001"]}
+  ]
+}

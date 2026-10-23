@@ -1,0 +1,25 @@
+{
+  "action": "dispatch",
+  "reason": "The deadline and owner are the two facts the goal names; one reading task can settle both.",
+  "evidence": [],
+  "tasks": [
+    {
+      "id": "project-facts",
+      "kind": "analysis",
+      "prompt": "Read examples/loop/fake/workspace/project.txt and output exactly two lines: deadline=YYYY-MM-DD and owner=NAME. Quote the source line for each.",
+      "question": "What are the project deadline and owner?",
+      "produces": "Two fact lines plus the source lines.",
+      "decision_impact": "These facts determine whether the goal can be completed or needs a source check.",
+      "tools": "read",
+      "acceptance": [
+        {"id": "c1", "text": "deadline line is present and exact"},
+        {"id": "c2", "text": "owner line is present and exact"}
+      ],
+      "acceptance_policy": "semantic",
+      "allowed_paths": [],
+      "depends_on": [],
+      "satisfies": ["g1", "g2"],
+      "max_chars": 200
+    }
+  ]
+}

@@ -1,4 +1,7 @@
-# Benchmark: DeepSeek swarm vs Claude alone
+# Benchmark: DeepSeek swarm vs Claude alone (one-shot runner)
+
+> This is the original one-shot benchmark (a fixed task list, no persistent loop).
+> The new dynamic-loop harness and its offline evidence are in `benchmarks/results/`.
 
 **Date:** 2026-10-22
 **Task:** Write full worked solutions to a six-question first-year circuits practice paper on the node voltage and mesh current methods (60 marks).

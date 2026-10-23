@@ -1,0 +1,12 @@
+{
+  "goal": "Example: extract the deadline and owner from notes/project.txt, then verify the answer.",
+  "constraints": [
+    "Only use files under examples/loop/fake/workspace",
+    "The final answer must state the source lines"
+  ],
+  "completion_criteria": [
+    {"id": "g1", "text": "The deadline is exactly 2026-11-05"},
+    {"id": "g2", "text": "The owner is exactly Lin"}
+  ],
+  "workspace": {"repo": null, "isolate": "worktree"}
+}

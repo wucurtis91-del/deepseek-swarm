@@ -1,0 +1,9 @@
+{
+  "action": "complete",
+  "reason": "Both goal facts are present in the verified artifact, and the source lines are quoted.",
+  "evidence": ["ev-0001"],
+  "completion": [
+    {"criterion": "g1", "met": true, "evidence": ["ev-0001"], "note": "deadline=2026-11-05"},
+    {"criterion": "g2", "met": true, "evidence": ["ev-0001"], "note": "owner=Lin"}
+  ]
+}
