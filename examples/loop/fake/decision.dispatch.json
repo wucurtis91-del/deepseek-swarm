@@ -1,0 +1,17 @@
+{
+  "action": "dispatch",
+  "reason": "One reading task settles both facts.",
+  "tasks": [{
+    "id": "facts",
+    "kind": "analysis",
+    "prompt": "Read workspace/project.txt and output deadline=... and owner=... with the source lines.",
+    "question": "What are the deadline and owner?",
+    "produces": "Two fact lines",
+    "decision_impact": "Determines completion",
+    "tools": "read",
+    "acceptance": [{"id": "c1", "text": "deadline exact"}, {"id": "c2", "text": "owner exact"}],
+    "acceptance_policy": "semantic",
+    "satisfies": ["g1", "g2"],
+    "max_chars": 200
+  }]
+}

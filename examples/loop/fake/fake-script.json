@@ -1,0 +1,6 @@
+{
+  "planner": [],
+  "worker": ["deadline=2026-11-05\nowner=Lin\n\n来源：\nDeadline: 2026-11-05\nOwner: Lin\n```selfcheck\n{\"met\": [\"c1\", \"c2\"], \"not_met\": [], \"uncertain\": []}\n```"],
+  "reviewer": ["```json\n{\"criteria\": [{\"id\": \"c1\", \"met\": true, \"note\": \"符合\"}, {\"id\": \"c2\", \"met\": true, \"note\": \"符合\"}], \"errors\": [], \"fix_instructions\": \"\"}\n```"],
+  "critic": []
+}

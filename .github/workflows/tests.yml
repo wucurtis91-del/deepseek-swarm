@@ -1,0 +1,29 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  offline:
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.11", "3.13"]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Unit tests (no API calls)
+        run: python -I -m unittest discover -s tests -v
+      - name: Offline benchmark harness
+        run: python benchmarks/harness.py --mode fake --out /tmp/benchmark-results
+      - name: CLI help smoke test
+        run: |
+          python scripts/swarm_loop.py --help
+          python scripts/swarm.py plan --help

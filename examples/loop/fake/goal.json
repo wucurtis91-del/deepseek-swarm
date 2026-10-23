@@ -1,0 +1,19 @@
+{
+  "goal": "Extract the deadline and owner from examples/loop/fake/workspace/project.txt.",
+  "constraints": [
+    "Only use the given file"
+  ],
+  "completion_criteria": [
+    {
+      "id": "g1",
+      "text": "deadline is 2026-11-05"
+    },
+    {
+      "id": "g2",
+      "text": "owner is Lin"
+    }
+  ],
+  "workspace": {
+    "repo": "examples/loop/fake"
+  }
+}

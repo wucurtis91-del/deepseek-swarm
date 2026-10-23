@@ -1,0 +1,63 @@
+{
+  "roles": {
+    "planner": {
+      "backend": "claude_cli",
+      "provider": "anthropic",
+      "model": "claude-opus-5-5",
+      "auth": "local_login",
+      "tools": "read",
+      "max_output_tokens": 16000,
+      "max_turns": 20,
+      "timeout": 900
+    },
+    "worker": {
+      "backend": "claude_cli",
+      "provider": "deepseek",
+      "model": "deepseek-flash",
+      "endpoint": "https://api.deepseek.com/anthropic",
+      "auth": "api_key",
+      "api_key_env": "DEEPSEEK_API_KEY",
+      "tools": "read",
+      "max_output_tokens": 64000,
+      "max_turns": 30,
+      "timeout": 900
+    },
+    "reviewer": {
+      "backend": "claude_cli",
+      "provider": "deepseek",
+      "model": "deepseek-flash",
+      "endpoint": "https://api.deepseek.com/anthropic",
+      "auth": "api_key",
+      "api_key_env": "DEEPSEEK_API_KEY",
+      "tools": "read",
+      "max_output_tokens": 48000,
+      "max_turns": 20,
+      "timeout": 900
+    },
+    "critic": {
+      "backend": "claude_cli",
+      "provider": "deepseek",
+      "model": "deepseek-flash",
+      "endpoint": "https://api.deepseek.com/anthropic",
+      "auth": "api_key",
+      "api_key_env": "DEEPSEEK_API_KEY",
+      "tools": "read",
+      "enabled": false
+    }
+  },
+  "loop": {
+    "concurrency": 3,
+    "max_repairs_per_task": 2,
+    "packet_max_chars": 30000,
+    "critic": {"enabled": false, "on_repeated_failures": 2},
+    "workspace": {"repo": null, "isolate": "worktree", "require_git_for_code": true}
+  },
+  "budget": {
+    "max_calls": 40,
+    "max_workflow_rounds": 12,
+    "max_seconds": 1800,
+    "max_tokens": 800000,
+    "max_usd": null,
+    "max_unknown_calls": 5
+  }
+}

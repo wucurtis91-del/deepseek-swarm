@@ -1,0 +1,1146 @@
+{
+  "harness_version": "1",
+  "generated_at": "2026-10-23T16:02:29+00:00",
+  "mode": "fake",
+  "git_commit": "a9b7cfb3a7379af9926a6f7803129bb1146d3e6f+dirty",
+  "python": "3.13.15",
+  "config": {
+    "roles": {
+      "planner": {
+        "backend": "fake",
+        "provider": "anthropic",
+        "model": "claude-opus-5-5",
+        "auth": "local_login",
+        "tools": "read"
+      },
+      "worker": {
+        "backend": "fake",
+        "provider": "deepseek",
+        "model": "deepseek-flash",
+        "auth": "api_key",
+        "api_key_env": "DEEPSEEK_API_KEY",
+        "tools": "read"
+      },
+      "reviewer": {
+        "backend": "fake",
+        "provider": "deepseek",
+        "model": "deepseek-flash",
+        "auth": "api_key",
+        "api_key_env": "DEEPSEEK_API_KEY",
+        "tools": "read"
+      },
+      "critic": {
+        "backend": "fake",
+        "provider": "deepseek",
+        "model": "deepseek-flash",
+        "auth": "api_key",
+        "api_key_env": "DEEPSEEK_API_KEY",
+        "enabled": false
+      }
+    },
+    "budget": {
+      "max_calls": 200,
+      "max_workflow_rounds": 30,
+      "max_seconds": 7200,
+      "max_tokens": 5000000,
+      "max_usd": null,
+      "max_unknown_calls": 20,
+      "max_repairs_per_task": 3,
+      "max_calls_per_role": {
+        "planner": 60
+      }
+    },
+    "prices": {
+      "deepseek-flash": {
+        "input": 0.3,
+        "cached_input": 0.006,
+        "cache_write": 0.3,
+        "output": 1.2,
+        "source": "https://api-docs.deepseek.com/quick_start/pricing (peak rates; off-peak 50%)",
+        "updated": "2026-10-22",
+        "peak": {
+          "utc_offset_hours": 8,
+          "off_peak_start": "00:30",
+          "off_peak_end": "08:30",
+          "off_peak_factor": 0.5
+        }
+      },
+      "deepseek-v4-pro": {
+        "input": 1.32,
+        "cached_input": 0.044,
+        "cache_write": 1.32,
+        "output": 3.96,
+        "source": "https://api-docs.deepseek.com/quick_start/pricing (peak rates; off-peak 50%)",
+        "updated": "2026-10-22",
+        "peak": {
+          "utc_offset_hours": 8,
+          "off_peak_start": "00:30",
+          "off_peak_end": "08:30",
+          "off_peak_factor": 0.5
+        }
+      },
+      "claude-opus-5-5": {
+        "input": 4.0,
+        "cached_input": 0.2,
+        "cache_write": 5.0,
+        "output": 20.0,
+        "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+        "updated": "2026-10-23"
+      },
+      "claude-sonnet-5-5": {
+        "input": 2.0,
+        "cached_input": 0.1,
+        "cache_write": 2.5,
+        "output": 10.0,
+        "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+        "updated": "2026-10-23"
+      },
+      "claude-haiku-5-5": {
+        "input": 0.1,
+        "cached_input": 0.01,
+        "cache_write": 0.125,
+        "output": 0.5,
+        "source": "https://platform.claude.com/docs/en/about-claude/pricing (prompts <=100k; long-context rates are higher)",
+        "updated": "2026-10-23"
+      },
+      "claude-fable-5-1": {
+        "input": 10.0,
+        "cached_input": 0.25,
+        "cache_write": 12.5,
+        "output": 50.0,
+        "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+        "updated": "2026-10-23"
+      }
+    }
+  },
+  "randomness": "none in fake mode; real mode uses provider defaults",
+  "real_budget": null,
+  "notes": [
+    "fake mode validates controller behavior and metrics only",
+    "quality checks are independent of the worker's self-report",
+    "no savings ratio is assumed"
+  ],
+  "results": [
+    {
+      "case": "reading",
+      "approach": "legacy",
+      "mode": "fake",
+      "goal_completed": true,
+      "quality_passed": true,
+      "independent_checks": [
+        {
+          "name": "facts:alpha",
+          "ok": true,
+          "detail": "all facts"
+        },
+        {
+          "name": "facts:beta",
+          "ok": true,
+          "detail": "all facts"
+        }
+      ],
+      "metrics": {
+        "calls": 2,
+        "tokens": {
+          "input": 1600,
+          "cache_read": 0,
+          "output": 400
+        },
+        "cost_usd_known": 0.00096,
+        "cost_coverage": "full",
+        "cost_unknown_calls": 0,
+        "wall_seconds": 0.07,
+        "worker_rounds": 2,
+        "rework": 0,
+        "shrinks": 0,
+        "statuses": {
+          "doc-beta": "ok",
+          "doc-alpha": "ok"
+        }
+      },
+      "raw": {
+        "summary": {},
+        "statuses": "dict_keys(['doc-beta', 'doc-alpha'])",
+        "exit_code": null,
+        "error": null
+      },
+      "elapsed_seconds": 0.07
+    },
+    {
+      "case": "reading",
+      "approach": "loop",
+      "mode": "fake",
+      "goal_completed": true,
+      "quality_passed": true,
+      "independent_checks": [
+        {
+          "name": "facts:alpha",
+          "ok": true,
+          "detail": "all facts"
+        },
+        {
+          "name": "facts:beta",
+          "ok": true,
+          "detail": "all facts"
+        }
+      ],
+      "metrics": {
+        "calls": 4,
+        "calls_by_role": {
+          "planner": 2,
+          "worker": 2,
+          "reviewer": 0,
+          "critic": 0,
+          "compressor": 0
+        },
+        "external_planner_unmetered": 0,
+        "tokens": {
+          "planner": {
+            "input": 200,
+            "cache_read": 0,
+            "output": 100
+          },
+          "worker": {
+            "input": 200,
+            "cache_read": 0,
+            "output": 100
+          },
+          "reviewer": {
+            "input": 0,
+            "cache_read": 0,
+            "output": 0
+          },
+          "critic": {
+            "input": 0,
+            "cache_read": 0,
+            "output": 0
+          },
+          "compressor": {
+            "input": 0,
+            "cache_read": 0,
+            "output": 0
+          }
+        },
+        "cost_usd_known": 0.00298,
+        "cost_coverage": "full",
+        "cost_unknown_calls": 0,
+        "wall_seconds": 0.08,
+        "workflow_rounds": 2,
+        "worker_rounds": 2,
+        "rework": 0,
+        "statuses": {
+          "doc-alpha": "completed",
+          "doc-beta": "completed"
+        }
+      },
+      "raw": {
+        "summary": {
+          "run_id": "20261023T160228Z-f1b1827f",
+          "status": "complete",
+          "mode": "auto",
+          "round": 2,
+          "goal": "Read docs/alpha.txt and docs/beta.txt and extract the project deadline, budget, owner, vendor risk date and mitigation date from the source lines.",
+          "completion_criteria": [
+            {
+              "id": "g1",
+              "text": "alpha deadline is extracted exactly from the source"
+            },
+            {
+              "id": "g2",
+              "text": "alpha budget is extracted exactly from the source"
+            },
+            {
+              "id": "g3",
+              "text": "alpha owner is extracted exactly from the source"
+            },
+            {
+              "id": "g4",
+              "text": "beta risk date is extracted exactly from the source"
+            },
+            {
+              "id": "g5",
+              "text": "beta mitigation date is extracted exactly from the source"
+            }
+          ],
+          "task_counts": {
+            "completed": 2
+          },
+          "budget": {
+            "limits": {
+              "max_calls": 200,
+              "max_workflow_rounds": 30,
+              "max_seconds": 7200,
+              "max_tokens": 5000000,
+              "max_usd": null,
+              "max_unknown_calls": 20,
+              "max_repairs_per_task": 3,
+              "max_calls_per_role": {
+                "planner": 60
+              }
+            },
+            "roles": {
+              "planner": {
+                "calls": 2,
+                "retry_calls": 0,
+                "external_decisions": 0,
+                "input_tokens": 200,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "output_tokens": 100,
+                "reasoning_tokens": 0,
+                "seconds": 0.02,
+                "cost_usd": 0.0028,
+                "cost_known": true,
+                "cost_unknown_calls": 0,
+                "usage_unknown_calls": 0,
+                "provider_reported_usd": 0.0,
+                "models": {
+                  "claude-opus-5-5": 2
+                }
+              },
+              "worker": {
+                "calls": 2,
+                "retry_calls": 0,
+                "external_decisions": 0,
+                "input_tokens": 200,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "output_tokens": 100,
+                "reasoning_tokens": 0,
+                "seconds": 0.02,
+                "cost_usd": 0.00018,
+                "cost_known": true,
+                "cost_unknown_calls": 0,
+                "usage_unknown_calls": 0,
+                "provider_reported_usd": 0.0,
+                "models": {
+                  "deepseek-flash": 2
+                }
+              },
+              "reviewer": {
+                "calls": 0,
+                "retry_calls": 0,
+                "external_decisions": 0,
+                "input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "output_tokens": 0,
+                "reasoning_tokens": 0,
+                "seconds": 0.0,
+                "cost_usd": 0.0,
+                "cost_known": true,
+                "cost_unknown_calls": 0,
+                "usage_unknown_calls": 0,
+                "provider_reported_usd": 0.0,
+                "models": {}
+              },
+              "critic": {
+                "calls": 0,
+                "retry_calls": 0,
+                "external_decisions": 0,
+                "input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "output_tokens": 0,
+                "reasoning_tokens": 0,
+                "seconds": 0.0,
+                "cost_usd": 0.0,
+                "cost_known": true,
+                "cost_unknown_calls": 0,
+                "usage_unknown_calls": 0,
+                "provider_reported_usd": 0.0,
+                "models": {}
+              },
+              "compressor": {
+                "calls": 0,
+                "retry_calls": 0,
+                "external_decisions": 0,
+                "input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "output_tokens": 0,
+                "reasoning_tokens": 0,
+                "seconds": 0.0,
+                "cost_usd": 0.0,
+                "cost_known": true,
+                "cost_unknown_calls": 0,
+                "usage_unknown_calls": 0,
+                "provider_reported_usd": 0.0,
+                "models": {}
+              }
+            },
+            "calls": 4,
+            "tokens": 600,
+            "cost_usd_known": 0.00298,
+            "cost_coverage": "full",
+            "cost_unknown_calls": 0,
+            "usage_unknown_calls": 0,
+            "external_unmetered": 0,
+            "reserved": {
+              "calls": 0,
+              "tokens": 0,
+              "usd": 0.0
+            },
+            "reserved_roles": {
+              "planner": 0,
+              "worker": 0,
+              "reviewer": 0,
+              "critic": 0,
+              "compressor": 0
+            },
+            "reserved_unknown": 0,
+            "token_limit_semantics": "estimated",
+            "token_limit_note": "max_tokens is an estimated budget: one CLI call may make several tool-use turns; calls/rounds are hard limits",
+            "elapsed_seconds": 0.6,
+            "started_at": "2026-10-23T16:02:28+00:00",
+            "stop_reason": null,
+            "price_basis": "configured prices; unknown models are not priced"
+          },
+          "packet": "packets/0002.json",
+          "packet_round": 1,
+          "triggers": [],
+          "stop_reason": "goal_complete",
+          "question": null,
+          "completion": {
+            "entries": [
+              {
+                "criterion": "g1",
+                "met": true,
+                "evidence": [
+                  "ev-0003"
+                ],
+                "note": ""
+              },
+              {
+                "criterion": "g2",
+                "met": true,
+                "evidence": [
+                  "ev-0003"
+                ],
+                "note": ""
+              },
+              {
+                "criterion": "g3",
+                "met": true,
+                "evidence": [
+                  "ev-0003"
+                ],
+                "note": ""
+              },
+              {
+                "criterion": "g4",
+                "met": true,
+                "evidence": [
+                  "ev-0001"
+                ],
+                "note": ""
+              },
+              {
+                "criterion": "g5",
+                "met": true,
+                "evidence": [
+                  "ev-0001"
+                ],
+                "note": ""
+              }
+            ],
+            "validated": true,
+            "at": "2026-10-23T16:02:28+00:00",
+            "summary": ""
+          },
+          "recovery": [],
+          "external_unmetered": 0
+        },
+        "statuses": "dict_keys(['doc-alpha', 'doc-beta'])",
+        "exit_code": null,
+        "error": null
+      },
+      "elapsed_seconds": 0.08
+    },
+    {
+      "case": "reading",
+      "approach": "claude_alone",
+      "mode": "fake",
+      "goal_completed": true,
+      "quality_passed": true,
+      "independent_checks": [
+        {
+          "name": "facts:alpha",
+          "ok": true,
+          "detail": "all facts"
+        },
+        {
+          "name": "facts:beta",
+          "ok": true,
+          "detail": "all facts"
+        }
+      ],
+      "metrics": {
+        "calls": 1,
+        "tokens": {
+          "input": 100,
+          "cache_read": 0,
+          "output": 50
+        },
+        "cost_usd_known": 0.0014,
+        "cost_coverage": "full",
+        "cost_unknown_calls": 0,
+        "wall_seconds": 0.0,
+        "rework": 0
+      },
+      "raw": {
+        "summary": {},
+        "statuses": "dict_keys([])",
+        "exit_code": null,
+        "error": null
+      },
+      "elapsed_seconds": 0.0
+    },
+    {
+      "case": "code",
+      "approach": "legacy",
+      "mode": "fake",
+      "goal_completed": true,
+      "quality_passed": true,
+      "independent_checks": [
+        {
+          "name": "fixed_tests",
+          "ok": true,
+          "detail": "ok\n"
+        },
+        {
+          "name": "test_file_unchanged",
+          "ok": true,
+          "detail": ""
+        }
+      ],
+      "metrics": {
+        "calls": 1,
+        "tokens": {
+          "input": 800,
+          "cache_read": 0,
+          "output": 200
+        },
+        "cost_usd_known": 0.00048,
+        "cost_coverage": "full",
+        "cost_unknown_calls": 0,
+        "wall_seconds": 0.07,
+        "worker_rounds": 1,
+        "rework": 0,
+        "shrinks": 0,
+        "statuses": {
+          "fix": "ok"
+        }
+      },
+      "raw": {
+        "summary": {},
+        "statuses": "dict_keys(['fix'])",
+        "exit_code": null,
+        "error": null
+      },
+      "elapsed_seconds": 0.13
+    },
+    {
+      "case": "code",
+      "approach": "loop",
+      "mode": "fake",
+      "goal_completed": true,
+      "quality_passed": true,
+      "independent_checks": [
+        {
+          "name": "patch_applies",
+          "ok": true,
+          "detail": ""
+        },
+        {
+          "name": "fixed_tests",
+          "ok": true,
+          "detail": "ok\n"
+        },
+        {
+          "name": "test_file_unchanged",
+          "ok": true,
+          "detail": ""
+        }
+      ],
+      "metrics": {
+        "calls": 3,
+        "calls_by_role": {
+          "planner": 2,
+          "worker": 1,
+          "reviewer": 0,
+          "critic": 0,
+          "compressor": 0
+        },
+        "external_planner_unmetered": 0,
+        "tokens": {
+          "planner": {
+            "input": 200,
+            "cache_read": 0,
+            "output": 100
+          },
+          "worker": {
+            "input": 100,
+            "cache_read": 0,
+            "output": 50
+          },
+          "reviewer": {
+            "input": 0,
+            "cache_read": 0,
+            "output": 0
+          },
+          "critic": {
+            "input": 0,
+            "cache_read": 0,
+            "output": 0
+          },
+          "compressor": {
+            "input": 0,
+            "cache_read": 0,
+            "output": 0
+          }
+        },
+        "cost_usd_known": 0.00289,
+        "cost_coverage": "full",
+        "cost_unknown_calls": 0,
+        "wall_seconds": 0.75,
+        "workflow_rounds": 2,
+        "worker_rounds": 1,
+        "rework": 0,
+        "statuses": {
+          "fix": "completed"
+        }
+      },
+      "raw": {
+        "summary": {
+          "run_id": "20261023T160228Z-4147161e",
+          "status": "complete",
+          "mode": "auto",
+          "round": 2,
+          "goal": "Fix calc.py",
+          "completion_criteria": [
+            {
+              "id": "g1",
+              "text": "tests pass"
+            }
+          ],
+          "task_counts": {
+            "completed": 1
+          },
+          "budget": {
+            "limits": {
+              "max_calls": 200,
+              "max_workflow_rounds": 30,
+              "max_seconds": 7200,
+              "max_tokens": 5000000,
+              "max_usd": null,
+              "max_unknown_calls": 20,
+              "max_repairs_per_task": 3,
+              "max_calls_per_role": {
+                "planner": 60
+              }
+            },
+            "roles": {
+              "planner": {
+                "calls": 2,
+                "retry_calls": 0,
+                "external_decisions": 0,
+                "input_tokens": 200,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "output_tokens": 100,
+                "reasoning_tokens": 0,
+                "seconds": 0.02,
+                "cost_usd": 0.0028,
+                "cost_known": true,
+                "cost_unknown_calls": 0,
+                "usage_unknown_calls": 0,
+                "provider_reported_usd": 0.0,
+                "models": {
+                  "claude-opus-5-5": 2
+                }
+              },
+              "worker": {
+                "calls": 1,
+                "retry_calls": 0,
+                "external_decisions": 0,
+                "input_tokens": 100,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "output_tokens": 50,
+                "reasoning_tokens": 0,
+                "seconds": 0.01,
+                "cost_usd": 9e-05,
+                "cost_known": true,
+                "cost_unknown_calls": 0,
+                "usage_unknown_calls": 0,
+                "provider_reported_usd": 0.0,
+                "models": {
+                  "deepseek-flash": 1
+                }
+              },
+              "reviewer": {
+                "calls": 0,
+                "retry_calls": 0,
+                "external_decisions": 0,
+                "input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "output_tokens": 0,
+                "reasoning_tokens": 0,
+                "seconds": 0.0,
+                "cost_usd": 0.0,
+                "cost_known": true,
+                "cost_unknown_calls": 0,
+                "usage_unknown_calls": 0,
+                "provider_reported_usd": 0.0,
+                "models": {}
+              },
+              "critic": {
+                "calls": 0,
+                "retry_calls": 0,
+                "external_decisions": 0,
+                "input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "output_tokens": 0,
+                "reasoning_tokens": 0,
+                "seconds": 0.0,
+                "cost_usd": 0.0,
+                "cost_known": true,
+                "cost_unknown_calls": 0,
+                "usage_unknown_calls": 0,
+                "provider_reported_usd": 0.0,
+                "models": {}
+              },
+              "compressor": {
+                "calls": 0,
+                "retry_calls": 0,
+                "external_decisions": 0,
+                "input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "output_tokens": 0,
+                "reasoning_tokens": 0,
+                "seconds": 0.0,
+                "cost_usd": 0.0,
+                "cost_known": true,
+                "cost_unknown_calls": 0,
+                "usage_unknown_calls": 0,
+                "provider_reported_usd": 0.0,
+                "models": {}
+              }
+            },
+            "calls": 3,
+            "tokens": 450,
+            "cost_usd_known": 0.00289,
+            "cost_coverage": "full",
+            "cost_unknown_calls": 0,
+            "usage_unknown_calls": 0,
+            "external_unmetered": 0,
+            "reserved": {
+              "calls": 0,
+              "tokens": 0,
+              "usd": 0.0
+            },
+            "reserved_roles": {
+              "planner": 0,
+              "worker": 0,
+              "reviewer": 0,
+              "critic": 0,
+              "compressor": 0
+            },
+            "reserved_unknown": 0,
+            "token_limit_semantics": "estimated",
+            "token_limit_note": "max_tokens is an estimated budget: one CLI call may make several tool-use turns; calls/rounds are hard limits",
+            "elapsed_seconds": 1.5,
+            "started_at": "2026-10-23T16:02:28+00:00",
+            "stop_reason": null,
+            "price_basis": "configured prices; unknown models are not priced"
+          },
+          "packet": "packets/0002.json",
+          "packet_round": 1,
+          "triggers": [],
+          "stop_reason": "goal_complete",
+          "question": null,
+          "completion": {
+            "entries": [
+              {
+                "criterion": "g1",
+                "met": true,
+                "evidence": [
+                  "ev-0001"
+                ],
+                "note": ""
+              }
+            ],
+            "validated": true,
+            "at": "2026-10-23T16:02:29+00:00",
+            "summary": ""
+          },
+          "recovery": [],
+          "external_unmetered": 0
+        },
+        "statuses": "dict_keys(['fix'])",
+        "exit_code": null,
+        "error": null
+      },
+      "elapsed_seconds": 0.82
+    },
+    {
+      "case": "code",
+      "approach": "claude_alone",
+      "mode": "fake",
+      "goal_completed": true,
+      "quality_passed": true,
+      "independent_checks": [
+        {
+          "name": "fixed_tests",
+          "ok": true,
+          "detail": "ok\n"
+        },
+        {
+          "name": "test_file_unchanged",
+          "ok": true,
+          "detail": ""
+        }
+      ],
+      "metrics": {
+        "calls": 1,
+        "tokens": {
+          "input": 100,
+          "cache_read": 0,
+          "output": 50
+        },
+        "cost_usd_known": 0.0014,
+        "cost_coverage": "full",
+        "cost_unknown_calls": 0,
+        "wall_seconds": 0.0,
+        "rework": 0
+      },
+      "raw": {
+        "summary": {},
+        "statuses": "dict_keys([])",
+        "exit_code": null,
+        "error": null
+      },
+      "elapsed_seconds": 0.06
+    },
+    {
+      "case": "diagnostic",
+      "approach": "legacy",
+      "mode": "fake",
+      "goal_completed": true,
+      "quality_passed": true,
+      "independent_checks": [
+        {
+          "name": "cause=errors",
+          "ok": true,
+          "detail": "cause=errors"
+        }
+      ],
+      "metrics": {
+        "calls": 4,
+        "tokens": {
+          "input": 3200,
+          "cache_read": 0,
+          "output": 800
+        },
+        "cost_usd_known": 0.00192,
+        "cost_coverage": "full",
+        "cost_unknown_calls": 0,
+        "wall_seconds": 0.0,
+        "worker_rounds": 4,
+        "rework": 0,
+        "shrinks": 0,
+        "statuses": {
+          "extract": "unreviewed",
+          "diag-errors": "unreviewed",
+          "diag-latency": "unreviewed",
+          "final": "unreviewed"
+        }
+      },
+      "raw": {
+        "summary": {},
+        "statuses": "dict_keys(['extract', 'diag-errors', 'diag-latency', 'final'])",
+        "exit_code": null,
+        "error": null
+      },
+      "elapsed_seconds": 0.0
+    },
+    {
+      "case": "diagnostic",
+      "approach": "loop",
+      "mode": "fake",
+      "goal_completed": true,
+      "quality_passed": true,
+      "independent_checks": [
+        {
+          "name": "cause=errors",
+          "ok": true,
+          "detail": "cause=errors"
+        }
+      ],
+      "metrics": {
+        "calls": 6,
+        "calls_by_role": {
+          "planner": 3,
+          "worker": 2,
+          "reviewer": 1,
+          "critic": 0,
+          "compressor": 0
+        },
+        "external_planner_unmetered": 0,
+        "tokens": {
+          "planner": {
+            "input": 300,
+            "cache_read": 0,
+            "output": 150
+          },
+          "worker": {
+            "input": 200,
+            "cache_read": 0,
+            "output": 100
+          },
+          "reviewer": {
+            "input": 100,
+            "cache_read": 0,
+            "output": 50
+          },
+          "critic": {
+            "input": 0,
+            "cache_read": 0,
+            "output": 0
+          },
+          "compressor": {
+            "input": 0,
+            "cache_read": 0,
+            "output": 0
+          }
+        },
+        "cost_usd_known": 0.00447,
+        "cost_coverage": "full",
+        "cost_unknown_calls": 0,
+        "wall_seconds": 0.07,
+        "workflow_rounds": 3,
+        "worker_rounds": 2,
+        "rework": 0,
+        "statuses": {
+          "extract": "completed",
+          "diag-errors": "completed"
+        }
+      },
+      "raw": {
+        "summary": {
+          "run_id": "20261023T160229Z-297e9529",
+          "status": "complete",
+          "mode": "auto",
+          "round": 3,
+          "goal": "Read data/metrics.txt and decide from the measured values whether errors or latency is the supported cause. Output the supported cause as cause=<value>.",
+          "completion_criteria": [
+            {
+              "id": "g1",
+              "text": "the cause is supported by the measured data"
+            }
+          ],
+          "task_counts": {
+            "completed": 2
+          },
+          "budget": {
+            "limits": {
+              "max_calls": 200,
+              "max_workflow_rounds": 30,
+              "max_seconds": 7200,
+              "max_tokens": 5000000,
+              "max_usd": null,
+              "max_unknown_calls": 20,
+              "max_repairs_per_task": 3,
+              "max_calls_per_role": {
+                "planner": 60
+              }
+            },
+            "roles": {
+              "planner": {
+                "calls": 3,
+                "retry_calls": 0,
+                "external_decisions": 0,
+                "input_tokens": 300,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "output_tokens": 150,
+                "reasoning_tokens": 0,
+                "seconds": 0.03,
+                "cost_usd": 0.0042,
+                "cost_known": true,
+                "cost_unknown_calls": 0,
+                "usage_unknown_calls": 0,
+                "provider_reported_usd": 0.0,
+                "models": {
+                  "claude-opus-5-5": 3
+                }
+              },
+              "worker": {
+                "calls": 2,
+                "retry_calls": 0,
+                "external_decisions": 0,
+                "input_tokens": 200,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "output_tokens": 100,
+                "reasoning_tokens": 0,
+                "seconds": 0.02,
+                "cost_usd": 0.00018,
+                "cost_known": true,
+                "cost_unknown_calls": 0,
+                "usage_unknown_calls": 0,
+                "provider_reported_usd": 0.0,
+                "models": {
+                  "deepseek-flash": 2
+                }
+              },
+              "reviewer": {
+                "calls": 1,
+                "retry_calls": 0,
+                "external_decisions": 0,
+                "input_tokens": 100,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "output_tokens": 50,
+                "reasoning_tokens": 0,
+                "seconds": 0.01,
+                "cost_usd": 9e-05,
+                "cost_known": true,
+                "cost_unknown_calls": 0,
+                "usage_unknown_calls": 0,
+                "provider_reported_usd": 0.0,
+                "models": {
+                  "deepseek-flash": 1
+                }
+              },
+              "critic": {
+                "calls": 0,
+                "retry_calls": 0,
+                "external_decisions": 0,
+                "input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "output_tokens": 0,
+                "reasoning_tokens": 0,
+                "seconds": 0.0,
+                "cost_usd": 0.0,
+                "cost_known": true,
+                "cost_unknown_calls": 0,
+                "usage_unknown_calls": 0,
+                "provider_reported_usd": 0.0,
+                "models": {}
+              },
+              "compressor": {
+                "calls": 0,
+                "retry_calls": 0,
+                "external_decisions": 0,
+                "input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "output_tokens": 0,
+                "reasoning_tokens": 0,
+                "seconds": 0.0,
+                "cost_usd": 0.0,
+                "cost_known": true,
+                "cost_unknown_calls": 0,
+                "usage_unknown_calls": 0,
+                "provider_reported_usd": 0.0,
+                "models": {}
+              }
+            },
+            "calls": 6,
+            "tokens": 900,
+            "cost_usd_known": 0.00447,
+            "cost_coverage": "full",
+            "cost_unknown_calls": 0,
+            "usage_unknown_calls": 0,
+            "external_unmetered": 0,
+            "reserved": {
+              "calls": 0,
+              "tokens": 0,
+              "usd": 0.0
+            },
+            "reserved_roles": {
+              "planner": 0,
+              "worker": 0,
+              "reviewer": 0,
+              "critic": 0,
+              "compressor": 0
+            },
+            "reserved_unknown": 0,
+            "token_limit_semantics": "estimated",
+            "token_limit_note": "max_tokens is an estimated budget: one CLI call may make several tool-use turns; calls/rounds are hard limits",
+            "elapsed_seconds": 0.7,
+            "started_at": "2026-10-23T16:02:29+00:00",
+            "stop_reason": null,
+            "price_basis": "configured prices; unknown models are not priced"
+          },
+          "packet": "packets/0003.json",
+          "packet_round": 2,
+          "triggers": [],
+          "stop_reason": "goal_complete",
+          "question": null,
+          "completion": {
+            "entries": [
+              {
+                "criterion": "g1",
+                "met": true,
+                "evidence": [
+                  "ev-0003"
+                ],
+                "note": ""
+              }
+            ],
+            "validated": true,
+            "at": "2026-10-23T16:02:29+00:00",
+            "summary": ""
+          },
+          "recovery": [],
+          "external_unmetered": 0
+        },
+        "statuses": "dict_keys(['extract', 'diag-errors'])",
+        "exit_code": null,
+        "error": null
+      },
+      "elapsed_seconds": 0.07
+    },
+    {
+      "case": "diagnostic",
+      "approach": "claude_alone",
+      "mode": "fake",
+      "goal_completed": true,
+      "quality_passed": true,
+      "independent_checks": [
+        {
+          "name": "cause=errors",
+          "ok": true,
+          "detail": "cause=errors"
+        }
+      ],
+      "metrics": {
+        "calls": 1,
+        "tokens": {
+          "input": 100,
+          "cache_read": 0,
+          "output": 50
+        },
+        "cost_usd_known": 0.0014,
+        "cost_coverage": "full",
+        "cost_unknown_calls": 0,
+        "wall_seconds": 0.0,
+        "rework": 0
+      },
+      "raw": {
+        "summary": {},
+        "statuses": "dict_keys([])",
+        "exit_code": null,
+        "error": null
+      },
+      "elapsed_seconds": 0.0
+    }
+  ]
+}
