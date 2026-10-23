@@ -111,6 +111,11 @@ class LoadTasks(unittest.TestCase):
         tasks, _ = self.load([{"id": "q1_a-2", "prompt": "p"}, {"prompt": "p"}])
         self.assertEqual([t["id"] for t in tasks], ["q1_a-2", "task2"])
 
+    def test_rejects_non_bool_review(self):
+        for bad in ("false", 0, None):
+            with self.assertRaises(SystemExit, msg=repr(bad)):
+                self.load([{"id": "a", "prompt": "p", "review": bad}])
+
     def test_rejects_bad_max_chars(self):
         for bad in (0, -5, "800", 1.5, True):
             with self.assertRaises(SystemExit, msg=repr(bad)):
@@ -165,6 +170,14 @@ class Unreviewed(Base):
         rec = swarm.run_task(self.task(acceptance=[]), "", r, self.out)
         self.assertEqual((rec["status"], rec["unreviewed_reason"]), ("unreviewed", "没有 acceptance"))
         self.assertNotIn("review_error", rec)
+
+    def test_task_review_false_skips_reviewer_but_shows_criteria(self):
+        r = FakeRunner(args(), worker=[ok("想法" + SELFCHECK)])
+        rec = swarm.run_task(self.task(review=False), "", r, self.out)
+        self.assertEqual((rec["status"], rec["unreviewed_reason"]), ("unreviewed", "任务设了 review: false"))
+        self.assertEqual(r.count("review"), 0)
+        self.assertIn("## 验收标准", r.calls[0][1])     # the worker still checks itself against them
+        self.assertIsNotNone(rec["selfcheck"])
 
     def test_no_review_flag(self):
         r = FakeRunner(args(review=False), worker=[ok("草稿")])

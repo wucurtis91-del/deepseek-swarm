@@ -59,7 +59,8 @@ python3 scripts/swarm.py run tasks.json --only ch2,ch5     # rerun selected task
 
 `tasks.json` holds an optional `shared_context` and a list of tasks with these fields: `id` (letters, digits, `_`
 and `-`) and `prompt`, plus optional `max_chars` (a length limit), `acceptance` (a list of criteria, which turns on
-review and rework), `cwd`, `tools` (`none`, `read` by default, `edit` or `bash`), `model`, `review_model`,
+review and rework), `review` (`false` skips review but still shows the criteria to the worker; the default for
+open-ended, multi-angle analysis), `cwd`, `tools` (`none`, `read` by default, `edit` or `bash`), `model`, `review_model`,
 `max_turns`, `timeout` and `add_dirs`.
 Useful flags: `--max-rework N`, `--no-review`, `--review-model`, `--max-chars N`, `--retries N` and
 `--max-output-tokens N`. See [SKILL.md](SKILL.md) for details.

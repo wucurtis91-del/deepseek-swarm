@@ -39,12 +39,16 @@ description: Offload token-heavy work to several DeepSeek workers running in par
      压不下来就直接判不通过，不再花钱请复核员数字数。2026-10-23 的实测里，6 个任务都写了
      「不超过 1500 字」，交回来的有 2200～3400 字，复核员好几轮都耗在数字数上。
    - 不要把预期答案写进标准里，否则复核就失去了意义。
+   - **多角度分析、头脑风暴、方案比较这类开放题，默认不复核**：照样写 `acceptance`（执行者会看到，
+     并按它自查），同时给任务设 `"review": false`。汇总时由你自己抽查关键事实。用户明确要求严格核对时
+     才打开复核。依据：2026-10-23 的实测里，6 个角度的头脑风暴有复核时花了 28 分钟、$1.37，
+     大部分耗在核对行号和数字数上。
 5. **运行**：`python3 -I SWARM run tasks.json`。预计超过 2 分钟的话放到后台运行。
 6. **核对**，按这个顺序：
    - 先看 `summary.json`，状态有四种：
      - `passed`：复核通过。
      - `unverified`：返工后仍没通过。
-     - `unreviewed`：有结果但没复核。可能是没写 `acceptance`、用了 `--no-review`，或者复核调用
+     - `unreviewed`：有结果但没复核。可能是没写 `acceptance`、任务设了 `"review": false`、用了 `--no-review`，或者复核调用
        重试后仍失败；最后这种同时列在 `review_failed` 里，原因在 `review_error`。这些结果只能当草稿。
      - `failed`：执行调用失败，没有结果。
    - 再看每个任务的 `selfcheck.uncertain`，这里是最可能出错的地方。
@@ -65,7 +69,8 @@ description: Offload token-heavy work to several DeepSeek workers running in par
      "acceptance": ["(a) 给出 R_EQ 及化简过程", "(b) 依次求出 V_B、V_A、V_S，注明所用定律",
                     "所有数值带单位，且与电路连接一致（复核员要独立求解核对）"]},
     {"id": "idea", "prompt": "从成本角度提 3 个方案，每个一行标题加两行理由，每行不超过 50 字。",
-     "tools": "none", "max_chars": 400}
+     "tools": "none", "max_chars": 400, "review": false,
+     "acceptance": ["3 个方案互不重复", "每个方案说明省在哪里"]}
   ]
 }
 ```
@@ -75,6 +80,7 @@ description: Offload token-heavy work to several DeepSeek workers running in par
 每个任务的可选字段：
 - `max_chars`：正文篇幅上限，按非空白字符计，自查块不算。
 - `acceptance`：有这一项才会进行复核和返工。
+- `review`：设为 `false` 时不复核，但执行者仍会看到 `acceptance` 并自查。开放题默认这样设。
 - `cwd`、`tools`、`add_dirs`：工作目录、工具预设、额外允许访问的目录。
 - `model`、`review_model`：执行者和复核员用的模型。
 - `max_turns`、`timeout`：每次调用的最大轮数和超时秒数。

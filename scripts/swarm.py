@@ -374,7 +374,7 @@ def run_task(task: dict, shared: str, runner: Runner, out: Path) -> dict:
     review_model = task.get("review_model", a.review_model or model)
     tools = task.get("tools", a.tools)
     limit = task.get("max_chars", a.max_chars)
-    do_review = a.review and bool(task.get("acceptance"))
+    do_review = a.review and task.get("review", True) and bool(task.get("acceptance"))
     rec = {"id": tid, "status": "failed", "rounds": 0, "shrinks": 0, "cost_usd": 0.0, "seconds": 0.0,
            "tokens": {"input": 0, "cache_read": 0, "output": 0}}
     # Drop results from an earlier run so a failed rerun never leaves stale output.
@@ -450,7 +450,9 @@ def run_task(task: dict, shared: str, runner: Runner, out: Path) -> dict:
         rec.update(selfcheck=check, chars=count_chars(body), error=None)
         if not do_review:
             rec["status"] = "unreviewed"
-            rec["unreviewed_reason"] = "--no-review" if task.get("acceptance") else "没有 acceptance"
+            rec["unreviewed_reason"] = ("没有 acceptance" if not task.get("acceptance")
+                                        else "任务设了 review: false" if task.get("review") is False
+                                        else "--no-review")
             break
         if limit and count_chars(body) > limit:
             # Still too long after compression: fail it here instead of paying a reviewer.
@@ -514,6 +516,8 @@ def load_tasks(path: Path) -> tuple[list[dict], str]:
             sys.exit(f"任务 {t['id']} 的 tools 只能是 {list(TOOL_PRESETS)}")
         if not isinstance(t.get("acceptance", []), list):
             sys.exit(f"任务 {t['id']} 的 acceptance 必须是字符串列表")
+        if not isinstance(t.get("review", True), bool):
+            sys.exit(f"任务 {t['id']} 的 review 只能是 true 或 false")
         ids.add(t["id"])
     return tasks, shared
 
@@ -529,7 +533,7 @@ def cmd_run(args) -> int:
     out.mkdir(parents=True, exist_ok=True)
     runner = Runner(args)
 
-    reviewed = sum(1 for t in tasks if args.review and t.get("acceptance"))
+    reviewed = sum(1 for t in tasks if args.review and t.get("review", True) and t.get("acceptance"))
     log(f"并行运行 {len(tasks)} 个任务（{reviewed} 个带复核，最多返工 {args.max_rework} 次），"
         f"最多同时 {args.concurrency} 个，结果写入 {out}")
     t0 = time.time()
