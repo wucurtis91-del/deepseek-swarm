@@ -50,7 +50,7 @@ when every goal criterion has current, verified evidence accepted by the control
 - **Controller-side acceptance.** Deterministic checks run first; semantic review is opt-in and
   strict about criterion IDs and types. Code acceptance uses patches, paths and hashes.
 - **Explicit accounting.** Unknown prices, missing usage and the external planner's unmeasured
-  usage are recorded as unknown/partial, not zero.
+  usage are recorded as unknown/partial.
 
 ## Install
 
@@ -80,8 +80,8 @@ for JSON examples and an external-host session.
 
 ### External-host mode (reuse your current Claude session)
 
-The controller does **not** call another planner. Your Claude session reads a decision packet and
-writes a structured decision. This is the default and avoids a second planner with the same job.
+Your current Claude Code or Codex session reads a decision packet and writes a structured decision.
+This is the default mode: planning stays in the session you are already using.
 
 ```bash
 python3 scripts/swarm_loop.py start runs/demo --goal examples/loop/goal.json \
@@ -97,7 +97,7 @@ python3 scripts/swarm_loop.py cancel runs/demo --reason "user stopped"
 `decide` applies the decision, executes the ready batch, and writes the next packet. `next` is
 read-only apart from recovery of an interrupted run. The external Claude session's token usage is
 not visible to this process: it is recorded as `external_unmetered`, and cost coverage is `partial`,
-not zero.
+with partial coverage.
 
 ### Automatic-host mode
 
@@ -111,14 +111,13 @@ python3 scripts/swarm_loop.py auto runs/auto --max-steps 20
 
 Automatic mode uses a real backend. The CLI refuses a `fake` backend unless
 `--allow-fake-backend` is passed explicitly; fake mode is for tests and offline demos only. If the
-planner is unavailable, the run stops with `paused` and a `stop_reason`; it never silently switches
-to another model.
+planner is unavailable, the run saves a `paused` status and a `stop_reason`.
 
 ### Optional research mode
 
-Research mode is off by default. Enable it with `--research` at `start`, `goal.research: true`, or
-`loop.research_mode: true`. It adds persistent research bookkeeping but no default critic, no
-automatic probability model, no MCTS, and no extra model call per task.
+Enable research mode with `--research` at `start`, `goal.research: true`, or
+`loop.research_mode: true`. It keeps a research ledger and brings key results back to the planner
+for interpretation and a direction decision.
 
 ```bash
 python3 scripts/swarm_loop.py start runs/research \
@@ -520,9 +519,9 @@ rewrites the task and never becomes the source of truth.
   under `review_failed`; it is never counted as a pass;
 - a stale downstream result is not listed in `passed` and makes the command exit 1.
 
-The original benchmark in `benchmarks/2026-10-22-nodal-mesh.md` is still valid for the one-shot
-runner. It found that a small task did **not** save money overall. Input-heavy work where the planner reads
-short results instead of long documents is a useful candidate for measuring savings.
+The [one-shot benchmark](benchmarks/2026-10-22-nodal-mesh.md) includes a small task where planning
+and review cost more than the worker savings. Input-heavy work with short outputs is a useful next
+comparison: measure the whole workflow, including planning and verification.
 
 ## Tests
 
@@ -530,62 +529,9 @@ short results instead of long documents is a useful candidate for measuring savi
 python3 -I -m unittest discover -s tests -v
 ```
 
-The offline suite covers the persistent workflow, research mode and pricing logic on Python 3.9+. They cover, among other
-things:
-
-1. a first-round result changes the second-round task direction;
-2. local implementation errors use `repair`; wrong assumptions use `replan`;
-3. missing/contradictory reviewer output cannot pass;
-4. several worker completions are batched into one planner decision;
-5. resume does not re-run confirmed completed tasks;
-6. an interrupted write task is marked `unknown` and is not replayed;
-7. an upstream change marks downstream results `stale`;
-8. concurrent calls respect a hard call limit; unknown prices are unknown, not zero;
-9. one task exception does not destroy the batch or `summary.json`;
-10. a timed-out check does not leave a late side effect;
-11. relative paths, spaces and shell metacharacters in filenames are handled;
-12. check processes do not inherit unlisted credentials;
-13. planner and worker model/endpoint/credential environments do not leak into each other;
-14. external and automatic planning use the same decision protocol;
-15. completion stops the loop; repeated no-progress decisions stop it too;
-16. code scope violations and conflicting patches are detected.
-17. a corrupt `state.json` is rebuilt from event patches with tasks, evidence, budget and decisions intact;
-18. a truncated event-log tail is repaired, appended to and reloaded;
-19. a downstream code task diffs against its `input_commit`, so A→B→C and branch merges do not duplicate upstream patches;
-20. pausing/cancelling a batch drains in-flight futures and persists their artifacts instead of leaving `running` rows;
-21. per-role in-flight reservations, coordinated output caps and concurrent unknown-price limits hold;
-22. `task.model` reaches the real CLI command and is used for identity, budget and cost;
-23. `request_context` pages with offset/limit and preserves requested content in a small packet;
-24. benchmark goals contain no reference answers, the grader lives outside the workspace, and the legacy diagnostic depends on `extract`;
-25. three commits after a damaged event tail keep every task/evidence/budget/decision record and a continuous chain;
-26. a code repair starts from the previous patch, preserves prior fixes across consecutive repairs and feeds a downstream code task;
-27. deleting/modifying an artifact, patch or input, or changing an upstream version, rejects an old `complete`; unchanged evidence still completes;
-28. completion validates a two-level, three-level and shared dependency chain, checks shared upstream once, and reports the failing task/file/path;
-29. `isolate=none` is rejected before run creation, CLIs/configs no longer offer it, and non-git code tasks retain explicit snapshot behavior.
-30. shared dependencies validate each incoming edge independently of cache traversal order;
-31. nonzero CLI exits fail while retaining usage, and quoted shell placeholders preserve filenames;
-32. startup configuration survives source-file removal, with external/auto CLI flows reusing it;
-33. code patches include worker commits relative to the recorded input baseline; renames check both paths, and dirty paths are parsed from Git porcelain output;
-34. a completed key experiment enters a pending research review even without an `against` label;
-35. implementation failures, measurement issues and prediction mismatch do not auto-refute a hypothesis;
-36. invalidated support keeps other valid support, and invalidated refutations retain history and require review;
-37. route switches preserve unrelated artifacts and distinguish `tests_hypotheses` from `depends_on_hypotheses`;
-38. duplicate same-source observations are not independent, and research progress ignores reason rewrites and duplicate IDs;
-39. research packet trimming/compression keeps hypothesis, pending-result and evidence references;
-40. legacy hypotheses/refutations migrate as `legacy/unassessed`; normal runs and completion/budget behavior remain unchanged;
-41. a combined research update plus `complete` is validated on the final state and rolled back whole when rejected;
-42. resolved review IDs cannot cover a newer pending result, invalidated interpretations cannot resolve one, and exact replays stay no-ops;
-43. deleting an artifact invalidates its observation before review, blocks new support, and can be closed through the invalidation event;
-44. a hypothesis version bump blocks dependent-task completion, and reworded rationales/directions do not reset no-progress detection.
-45. a combined `complete` applies research updates, propagates dependent-task changes and refreshes pending/validity before validation, then rolls back the whole decision on failure;
-46. a replayed research payload cannot authorize a new `dispatch`/`verify`/`repair`/`replan`, while exact review replay and batch review remain valid;
-47. `switch`/`narrow`/`pause` are investment-only, while explicit definition or status updates re-open dependent tasks;
-48. a `needs_review` task can be cancelled through `replan`, keeps its artifact/research history, and a replacement result can complete the goal;
-49. model-visible fixture case and option names are neutral, evaluator mappings retain labels, and initial text contains no future evidence ids or verdicts.
-
-The default suite never calls a paid API. Fake backends, temporary directories, scripted CLIs and
-real local subprocesses are used. These tests validate controller behavior; they are not a
-real-model quality or cost evaluation.
+The suite exercises scheduling, acceptance, research reviews, recovery, code patches, budgets and
+pricing. It runs locally with fake model responses and real subprocess checks. CI runs the suite on
+Python 3.9, 3.11 and 3.13.
 
 ## Benchmark harness
 
@@ -601,8 +547,7 @@ It compares:
 - C. an optional Claude-alone baseline (`--include-claude-alone`).
 
 Cases: long-document extraction, a code fix with fixed tests and a negative test, and a diagnostic
-where the first result changes the next hypothesis. Quality is decided by independent checks run by
-the harness, never by a worker's own success claim.
+where the first result changes the next hypothesis. The harness scores the output with independent checks.
 
 Reference answers live in the grader outside the worker-visible case directory; case goals and
 tasks describe what to establish, not the expected values. The legacy diagnostic also depends on its
@@ -622,59 +567,28 @@ Example output from the offline harness (fake backend):
 | diagnostic | legacy | pass | 4 | $0.00096 | full |
 | diagnostic | loop | pass | 6 | $0.004335 | full |
 
-These are **fake-backend** numbers. They prove the controller executes the intended flow and that
-the metrics are collected; they do **not** show that a real model is smarter or cheaper. The fake
-loop is more expensive on these tiny cases because it pays for planner turns. Real evidence requires
-an opt-in run:
+This table uses scripted responses to check execution and accounting. To measure model quality and
+end-to-end cost, run the same cases with real backends and an explicit budget:
 
 ```bash
 python3 benchmarks/harness.py --mode real --config roles.json \
     --i-understand-this-spends --max-usd 3 --max-calls 60
 ```
 
-Real mode refuses to start without all three. It records the model configuration, git commit,
-Python version, raw results and independent checks. Do not read savings into the offline table.
+Real mode requires the spending flag and both budget limits. Its report includes model configuration,
+git commit, Python version, raw results and independent checks.
 
-## Known limits
+## Runtime notes
 
-- **No full sandbox.** Workers get a minimal environment and `--bare`/`--safe-mode`; check commands
-  get a minimal environment and redacted output. They still run with your user permissions and can
-  read files you can read. Do not point them at secret-bearing directories.
-- **Not exactly-once.** A shell command or code edit interrupted mid-flight is marked unknown and is
-  not replayed automatically. Recovery asks the planner what to do.
-- **No UI, distributed scheduler or multi-user service.** This is a single-machine CLI.
-- **Provider coverage is intentionally narrow:** Claude Code CLI plus the DeepSeek Anthropic-compatible
-  endpoint, with fake backends for tests. Other providers need a new backend adapter.
-- **External planner usage is unmetered.** The number is shown as unknown; the controller cannot see
-  your Claude session's tokens.
-- **Model prices/limits change.** The price table carries sources and dates; verify before relying on
-  a cost figure. Unknown prices produce unknown coverage.
-- **Critic and model compression are off by default.** Enable them only when the trigger and cost
-  make sense; both are metered.
-- **Fake benchmark ≠ model benchmark.** Real-model measurement is opt-in and costs money.
-- **Real legacy baseline has no hard in-process cap.** The harness skips it if its estimated upper
-  call bound exceeds the remaining global budget and reports any overshoot; the loop and Claude-alone
-  paths receive the remaining budget. Run only with an explicitly agreed budget.
+The runner is a single-machine CLI. Real backends use Claude Code CLI with Anthropic or DeepSeek;
+additional providers need a backend adapter. Workers and check commands run with the current user's
+filesystem permissions. Worktrees isolate code changes; use a dedicated workspace when selecting
+which files to expose to a worker.
 
-## Design notes: what each mechanism is for
-
-- **Decision packet instead of transcripts** → fewer planner tokens and less duplicate context.
-  Verified when packets stay small while full artifacts stay on disk.
-- **Batched planner turns** → the planner is not called after every worker; only after a meaningful
-  batch or a real trigger. Verified by call-count tests and benchmark metrics.
-- **Deterministic checks before semantic review** → cheap failures do not buy a reviewer call.
-  Verified by tests where a failing check skips review.
-- **Strict evidence IDs and completion validation** → completion requires current evidence for the
-  whole dependency chain, not a model declaration. Verified by rejected-completion and chain tests.
-- **Repair vs replan** → implementation errors keep valid work; wrong assumptions stop mechanical
-  rework. Verified by separate tests and preserved artifact versions.
-- **Persistent state, event journal and locks** → resume without replaying finished work; one writer.
-  Verified by recovery, truncated-log and lock tests.
-- **Code worktrees, patches and scope checks** → code acceptance is about actual files, and user
-  changes are not reset. Verified by code and patch-conflict tests.
-- **Budgets and unknown-cost accounting** → stop before overspending; never turn missing usage into
-  zero cost. Verified by reservation and unknown-price tests.
-- **Optional critic** → challenges assumptions only on real triggers; it is not a second full run.
+Interrupted commands with possible side effects are recorded as `unknown` for the planner to inspect.
+Cost reports distinguish measured usage, estimates and external-session usage. In real benchmarks,
+the legacy baseline is admitted using an estimated call bound and may overshoot; the harness records
+that in its report.
 
 ## Documentation
 

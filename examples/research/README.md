@@ -1,9 +1,7 @@
 # Research-mode walkthrough
 
-This example uses the optional research ledger. It does **not** establish a
-scientific conclusion by itself; the controller records observations,
-planner interpretations and direction decisions, then requires a review when a
-predeclared key experiment completes.
+This example follows a key experiment from its artifact to an interpretation and a direction
+decision. The research ledger keeps those steps together so the next planner turn can use them.
 
 ## Shortest path
 
@@ -31,7 +29,7 @@ The review action only changes research state. It creates no task. To run a
 follow-up experiment or change the task graph, use `dispatch`, `verify` or
 `replan` and include the same `research` payload in that decision.
 
-## Contract
+## How results become decisions
 
 - Observations are derived from completed task artifacts and have stable IDs,
   artifact hashes, source groups and histories.

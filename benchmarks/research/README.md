@@ -1,7 +1,7 @@
 # Research fixture protocol
 
-This directory holds offline fixtures for the minimal research mode. It does not
-run a paid model and does not claim a model-quality result.
+This directory provides evidence-replay and experiment-choice fixtures for comparing research
+workflows. The fixtures run offline; a model runner can use them to compare the three arms below.
 
 ## Fixtures
 
