@@ -258,6 +258,7 @@ python3 -I $LOOP next runs/demo
 | `repair` | 方向对、实现或验收失败：给 `target_task` 和 `instructions`，v+1 接着上一版改 |
 | `verify` | 要独立检查已有结果：检查必须能区分对错 |
 | `replan` | 假设被推翻、方法不可行、任务定义错了：可增改和取消任务，受影响的下游标 stale |
+| `review` | 研究模式中解释待审结果、记录下一步方向，不创建任务 |
 | `complete` | 每条完成条件都有当前有效的证据 |
 | `request_input` | 缺只有用户能给的信息：写具体 `question` |
 | `pause` | 预算、外部条件或明确要停 |
@@ -283,6 +284,44 @@ python3 -I $LOOP next runs/demo
 
 离线测试和 fake 评测（`python3 benchmarks/harness.py --mode fake`）只验证控制逻辑，不说明真实模型
 更准或更省。`--mode real` 会花钱，要用户明确同意预算。
+
+## 研究模式（可选）
+
+用 `start --research` 或 `goal.research: true` 开启。默认关闭时行为不变。
+
+- 任务用 `tests_hypotheses` 声明检验哪些假设，用 `depends_on_hypotheses` 声明结果依赖哪些假设；
+  `key_experiment: true` 的完成结果会进入 `packet.research.pending_results`，即使尚未被任何角色标成
+  `against`。
+- 可选的 `research_prediction` 是程序检查：`{"hypothesis":"h1","check":"unit","expect_exit":0}`。
+  只有该检查实际不匹配时才生成 `prediction_mismatch`；没有程序检查时，控制器不声称发现科学矛盾。
+- 用 `review` 处理待审查结果：`research.review_ids` + 引用 `observation` 的解释 + `direction`。
+  `review` 只更新研究判断，不创建任务；需要实验/改图时用 `dispatch`/`verify`/`replan` 携带同一
+  `research`。待审查的 key/prediction 结果必须解释其 observation、相关假设的当前版本并给方向；
+  已 resolved 的 `review_id` 不能覆盖后来的 pending 事件，精确重放是幂等 no-op。
+- `complete` 时仍有任何待审查事件会被拒绝；`complete` 可以与研究更新同条提交，但按更新后的最终
+  状态校验，失败则整条回滚。解释可用 `supersedes` 修正同一 observation/版本/条件下的旧解释；
+  旧解释保留在历史但 inactive，不再支持假设。
+- `direction.choice` 是 `continue|experiment|narrow|switch|pause|stop`。切换/暂停是投入选择，
+  不要求负结果，也不会改写假设状态或让已有依赖任务失去完成资格；显式有效性变化必须用
+  `hypothesis_updates`（定义/范围变化会升版）。单假设校准、复现和测量任务合法；控制器不会把
+  一次实现失败或 `against` 解释自动变成 `contradicted`。
+- 任务执行时记录依赖的假设版本；定义/范围升版或显式 status 变化后，依赖任务进入
+  `needs_review`，不能直接完成目标。`complete` 会先在同一事务里应用研究更新、传播依赖和刷新
+  pending/有效性，再校验；失败整条回滚，成功后重新打开刷新不应再产生本条决策带来的新待审事件。
+- `review` 的 research payload 精确重放只是幂等 no-op，不会消费新的 pending；新的
+  `dispatch`/`verify`/`repair`/`replan` 仍需按当前 pending 通过审查校验，不能拿旧 payload 当执行许可。
+- `needs_review` 任务可用 `replan.cancel` 取消；artifact 和研究历史保留，完成证据标为失效，
+  受影响下游失效，随后可用替代任务完成目标。
+- 证据失效会先按验收同一套 artifact/patch/input/依赖链校验刷新，再保留观察/解释历史，标记依赖
+  解释 `needs_review`，并保留其他有效支持；失效 observation 不能用新的 `supports`/`against`
+  解释，`evidence_invalidated` 事件可单独审查关闭；改路线不删除无关 artifact。旧
+  `hypotheses/refuted` 在启用研究模式时标为 `legacy/unassessed`。
+- 研究材料有大小限制和分页（`pending_total`/`next_offset`/`limits`，正文用
+  `research_page` 或 `request_context` 继续取页）；关键 id/状态/假设版本/失效引用不会被裁剪或
+  被空对象、null、篡改结构绕过；若最小结构仍超预算会报告 `limits.min_chars`。研究事件不会
+  额外调用模型，审查使用现有 planner 预算。
+
+完整字段、状态和示例见 `README.md` 与 `examples/research/`。
 
 ## 给 Codex 用时
 

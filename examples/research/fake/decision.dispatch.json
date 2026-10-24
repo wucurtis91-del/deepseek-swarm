@@ -1,0 +1,28 @@
+{
+  "action": "dispatch",
+  "reason": "Predeclare a key result and two competing hypotheses.",
+  "research": {
+    "hypothesis_updates": [
+      {"id": "h1", "text": "H1 predicts X", "scope": "the supplied condition", "core": true, "version": 1},
+      {"id": "h2", "text": "H2 predicts Y", "scope": "the supplied condition", "core": false, "version": 1}
+    ]
+  },
+  "tasks": [{
+    "id": "probe",
+    "kind": "analysis",
+    "prompt": "Report the supplied observation as an artifact. Do not decide whether a hypothesis is true.",
+    "question": "Does the key result show X or Y?",
+    "produces": "The observed outcome",
+    "decision_impact": "It is reviewed before a direction change",
+    "tools": "none",
+    "tests_hypotheses": ["h1", "h2"],
+    "depends_on_hypotheses": [],
+    "key_experiment": true,
+    "acceptance": [{"id": "c1", "text": "outcome reported", "check": "unit"}],
+    "acceptance_policy": "deterministic",
+    "checks": [{"name": "unit", "argv": ["python3", "-c", "raise SystemExit(0)"]}],
+    "allowed_paths": [],
+    "depends_on": [],
+    "satisfies": ["g1"]
+  }]
+}

@@ -115,6 +115,7 @@ DEFAULT_LOOP = {
     "packet_max_chars": 30000,
     "max_tasks": 100,
     "max_steps": 50,
+    "research_mode": False,
     "critic": {"enabled": False, "on_repeated_failures": 2},
     "workspace": {"repo": None, "isolate": "worktree", "require_git_for_code": True},
     "check_timeout": 300,
@@ -353,6 +354,8 @@ def normalize_loop(values: dict | None) -> dict:
     if not isinstance(loop.get("check_env_allow"), list) or \
             not all(isinstance(x, str) for x in loop["check_env_allow"]):
         raise ConfigError("loop.check_env_allow 必须是字符串列表")
+    if not isinstance(loop.get("research_mode"), bool):
+        raise ConfigError("loop.research_mode 必须是布尔值")
     critic = loop.get("critic")
     if not isinstance(critic, dict) or not isinstance(critic.get("enabled"), bool) or \
             type(critic.get("on_repeated_failures")) is not int:
@@ -399,11 +402,15 @@ def normalize_goal(obj: dict) -> dict:
             raise ConfigError(f"完成条件 id 重复：{cid}")
         seen.add(cid)
         criteria.append({"id": cid, "text": ctext.strip()})
+    research = obj.get("research", False)
+    if not isinstance(research, bool):
+        raise ConfigError("goal.research 必须是布尔值")
     goal = {
         "text": text.strip(),
         "constraints": [c.strip() for c in constraints if c.strip()],
         "criteria": criteria,
         "workspace": obj.get("workspace"),
+        "research": research,
     }
     if goal["workspace"] is not None and not isinstance(goal["workspace"], dict):
         raise ConfigError("goal.workspace 必须是对象")

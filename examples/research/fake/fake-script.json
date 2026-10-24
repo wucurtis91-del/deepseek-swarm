@@ -1,0 +1,6 @@
+{
+  "planner": [],
+  "worker": ["observed: X\n\n```selfcheck\n{\"met\": [\"c1\"], \"not_met\": [], \"uncertain\": []}\n```"],
+  "reviewer": [],
+  "critic": []
+}

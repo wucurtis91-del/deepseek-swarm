@@ -1,0 +1,49 @@
+{
+  "action": "dispatch",
+  "reason": "Create a predeclared key experiment and two competing hypotheses.",
+  "evidence": [],
+  "research": {
+    "hypothesis_updates": [
+      {
+        "id": "h1",
+        "text": "Mechanism A predicts outcome X under the stated conditions.",
+        "scope": "supplied observations; controlled condition",
+        "core": true,
+        "alternatives": ["h2"],
+        "version": 1
+      },
+      {
+        "id": "h2",
+        "text": "Mechanism B predicts outcome Y under the same conditions.",
+        "scope": "same observations; same condition",
+        "core": false,
+        "alternatives": ["h1"],
+        "version": 1
+      }
+    ]
+  },
+  "tasks": [
+    {
+      "id": "probe",
+      "kind": "analysis",
+      "prompt": "Read the supplied observations and run the declared check. Report the observed outcome without deciding whether a hypothesis is true.",
+      "question": "Does the key experiment produce X or Y?",
+      "produces": "A short observation record plus the check result.",
+      "decision_impact": "The result is sent to a research review before any route change.",
+      "tools": "read",
+      "tests_hypotheses": ["h1", "h2"],
+      "depends_on_hypotheses": [],
+      "key_experiment": true,
+      "acceptance": [
+        {"id": "c1", "text": "The observation is reported and the check passes.", "check": "unit"}
+      ],
+      "acceptance_policy": "deterministic",
+      "checks": [
+        {"name": "unit", "argv": ["python3", "-c", "raise SystemExit(0)"]}
+      ],
+      "allowed_paths": [],
+      "depends_on": [],
+      "satisfies": []
+    }
+  ]
+}

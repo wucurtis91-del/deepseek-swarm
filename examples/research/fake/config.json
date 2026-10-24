@@ -1,0 +1,8 @@
+{
+  "roles": {
+    "planner": {"backend": "fake", "provider": "anthropic", "model": "claude-opus-5-5", "auth": "local_login", "tools": "read"},
+    "worker": {"backend": "fake", "provider": "deepseek", "model": "deepseek-flash", "auth": "api_key", "api_key_env": "DEEPSEEK_API_KEY", "tools": "read"},
+    "reviewer": {"backend": "fake", "provider": "deepseek", "model": "deepseek-flash", "auth": "api_key", "api_key_env": "DEEPSEEK_API_KEY", "tools": "read"},
+    "critic": {"backend": "fake", "provider": "deepseek", "model": "deepseek-flash", "auth": "api_key", "api_key_env": "DEEPSEEK_API_KEY", "enabled": false}
+  }
+}

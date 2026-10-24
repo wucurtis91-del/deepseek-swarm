@@ -1,0 +1,25 @@
+{
+  "action": "review",
+  "reason": "Explain the pending key result and record the next direction.",
+  "research": {
+    "review_ids": ["<rr-id from packet.research.pending_results>"],
+    "interpretations": [
+      {
+        "observation": "<obs-id from packet.research.pending_results>",
+        "hypothesis": "h1",
+        "hypothesis_version": 1,
+        "relation": "inconclusive",
+        "conditions": "same supplied observations; one run",
+        "rationale": "The result is compatible with both hypotheses; a discriminating test is needed.",
+        "source": "planner"
+      }
+    ],
+    "direction": {
+      "choice": "experiment",
+      "hypothesis": "h1",
+      "alternatives": ["h2"],
+      "evidence": ["<ev-id>"],
+      "reason": "Run one predeclared discriminating experiment rather than switching on ambiguity."
+    }
+  }
+}

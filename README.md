@@ -88,6 +88,134 @@ Automatic mode uses a real backend. The CLI refuses a `fake` backend unless
 planner is unavailable, the run stops with `paused` and a `stop_reason`; it never silently switches
 to another model.
 
+### Optional research mode
+
+Research mode is off by default. Enable it with `--research` at `start`, `goal.research: true`, or
+`loop.research_mode: true`. It adds persistent research bookkeeping but no default critic, no
+automatic probability model, no MCTS, and no extra model call per task.
+
+```bash
+python3 scripts/swarm_loop.py start runs/research \
+    --goal examples/research/goal.json --config roles.json --research
+python3 scripts/swarm_loop.py next runs/research
+# write a decision based on packet.research.pending_results
+python3 scripts/swarm_loop.py decide runs/research decision.json --config roles.json
+```
+
+The shortest walkthrough and JSON templates are in [examples/research/README.md](examples/research/README.md).
+
+**Data model.** Research mode keeps four separate layers:
+
+- `state.research.observations`: controller-created records for completed artifact evidence, with
+  `evidence`, `version`, `artifact_sha256`, `source`, `source_group`, status and revision history;
+- `state.research.interpretations`: planner judgments that reference an observation and a hypothesis
+  version, with `supports` / `against` / `inconclusive` / `mixed`, conditions, rationale, source,
+  active/needs-review state, history and optional `supersedes` references for a correction;
+- `state.hypotheses`: versioned hypotheses (`open`, `supported`, `contested`, `contradicted`,
+  `inconclusive`, `superseded`, `legacy`), scope, core flag, alternatives and current valid evidence;
+- `state.research.reviews`: direction decisions with a trigger, evidence references and reason.
+
+A controller-computed `source_group` is based on the task, artifact hash, input hashes, upstream
+versions and optional `experiment_group`. A planner-provided `independent: true` is retained only as
+a claim and never treated as proof of independence. Reusing the same observation does not create a
+second independent support.
+
+**Task relationship.** Tasks can declare:
+
+```json
+{"tests_hypotheses": ["h1", "h2"], "depends_on_hypotheses": ["h1"],
+ "key_experiment": true,
+ "research_prediction": {"hypothesis": "h1", "check": "unit", "expect_exit": 0}}
+```
+
+`tests_hypotheses` says what the experiment tests; `depends_on_hypotheses` says what must remain
+valid for the task result to be usable. The controller records the hypothesis versions a task
+depended on when it starts. If a definition or scope change bumps a hypothesis version, or an
+explicit `hypothesis_updates` status change marks the hypothesis `superseded`/`contradicted`,
+dependent tasks are marked `needs_review` and cannot be used to complete the goal until the
+dependency is handled; tasks that only tested the old hypothesis remain valid observations. A
+`switch`/`narrow` direction is an investment choice and does **not** change hypothesis status or
+dependent task eligibility; use `hypothesis_updates` for an explicit validity change.
+`key_experiment` puts a completed result into `packet.research.pending_results` even when no one has
+labelled it `against`. `research_prediction` creates a `prediction_mismatch` event only when the
+declared program check has an unexpected exit code; without a declared check the controller does not
+claim that a scientific contradiction was detected.
+
+**Decision protocol.** `review` is a research-only action that updates research state without
+creating a task:
+
+```json
+{
+  "action": "review",
+  "reason": "Explain the pending result and choose the next direction.",
+  "research": {
+    "review_ids": ["rr-0001"],
+    "interpretations": [{
+      "observation": "obs-0001", "hypothesis": "h1", "hypothesis_version": 1,
+      "relation": "inconclusive", "conditions": "one pilot",
+      "rationale": "ambiguous", "source": "planner"
+    }],
+    "direction": {"choice": "experiment", "hypothesis": "h1",
+                  "alternatives": ["h2"], "reason": "run a discriminating test"}
+  }
+}
+```
+
+`research` can also accompany `dispatch`, `verify`, `replan` or `complete` so one planner call can
+review and act.
+A review ID must name a currently pending event; a resolved ID cannot cover a later pending result.
+A key/prediction result must be explained against its own observation, a related hypothesis and that
+hypothesis's current version, and the decision must record a direction. Batch review is allowed, but
+`complete` is rejected while any research event is still pending. `complete` may appear in the same
+decision as research updates; the controller applies the updates, propagates hypothesis changes to
+dependent tasks and pending events, refreshes evidence validity, and only then validates completion
+against that final state. If it fails, the research and planner updates in that decision are rolled
+back together. After a successful commit, reopening and refreshing must not create new dependency
+failures or pending events caused by that same decision. An exact replay of an already applied
+review payload is an idempotent no-op, not coverage for a new event: a new `dispatch`, `verify`,
+`repair` or `replan` that carries the old payload is still rejected while current pending results
+remain. Interpretations may use `supersedes` to correct an active interpretation only when the
+observation, hypothesis, version and conditions match; superseded interpretations stay in history
+but are inactive and cannot support a hypothesis again. A review with no task graph change does not
+create a fake dispatch task.
+
+`direction.choice` is `continue`, `experiment`, `narrow`, `switch`, `pause` or `stop`. These are
+investment decisions, not truth or validity labels. A switch or pause does **not** require a negative
+result; opportunity cost and resource constraints are valid reasons. It does not rewrite the
+hypothesis status or invalidate a dependent task's completed result. A positive single-hypothesis
+calibration, replication or measurement task is also valid; experiments do not need two hypotheses.
+The controller records the reason and does not auto-convert `against` evidence into
+`contradicted`. Evidence interpretations still derive `open`/`supported`/`contested`/
+`needs_review`; a switch or pause does not. `contradicted`/`superseded` and definition/scope
+changes come only from an explicit `hypothesis_updates` entry (definition/scope changes bump the
+version).
+
+**Invalidation and recovery.** Before a research review, the controller reuses the completion
+validator to re-check the recorded artifact, code patch, input hashes and the full dependency chain,
+with a shared cache. Evidence that becomes stale/superseded or whose files no longer match
+invalidates its observation, marks dependent interpretations `needs_review`, and preserves revision
+history. Invalidated observations cannot receive new `supports`/`against` interpretations; the
+resulting `evidence_invalidated` event can be reviewed and closed without resubmitting the invalid
+support. Remaining valid supports are retained; a partial support loss does not negate the whole
+hypothesis. Legacy `hypotheses`/`refuted` records are migrated to `legacy`/`unassessed` when research
+mode is enabled; they are not silently promoted to current truth. A `needs_review` task can be
+cancelled through `replan.cancel`; its artifact and research history remain, while its completion
+evidence becomes superseded and affected downstream results are invalidated so a replacement route
+can finish the goal. Research state is in the normal state/event journal, so recovery keeps
+observations, review IDs, review fingerprints and pending events.
+
+The research packet is bounded and includes active hypotheses, pending/reviewed results, valid and
+invalidated evidence references, source groups, recent reviews, totals for
+hypotheses/pending/invalidated/reviewed records, `pending_offset`/`pending_returned`,
+`next_offset`, `truncated_sections` and `limits`. Pending results are paginated; fetch
+another page with `context_requests: [{"research_page": N}]`. If even the minimum one-item structure
+exceeds its budget, `limits.over_budget` is set and `limits.min_chars` reports the required space
+instead of silently pretending it fit. Trimming/compression must retain research IDs, statuses,
+hypothesis versions, pending evidence references and invalidation references; an empty, null,
+reshaped or tampered `research` section is rejected rather than accepted as compression.
+
+No research event adds a model call. Direction review uses the existing planner accounting/budget.
+
 ### Roles and provider isolation
 
 `roles.json`:
@@ -157,8 +285,8 @@ Every planner turn returns one JSON object:
 }
 ```
 
-Actions: `dispatch`, `repair`, `verify`, `replan`, `complete`, `request_input`, `pause`, and
-`request_context`.
+Actions: `dispatch`, `repair`, `verify`, `replan`, `complete`, `review`, `request_input`, `pause`,
+and `request_context`.
 
 - `dispatch` adds tasks. Existing task IDs cannot be re-dispatched; use `replan` to change them.
 - `repair` targets a failed/unverified task: the method stays valid, the implementation is wrong.
@@ -178,6 +306,9 @@ Actions: `dispatch`, `repair`, `verify`, `replan`, `complete`, `request_input`, 
   it refreshes the current task/version, artifact/patch hashes, input files, upstream versions/status
   and acceptance signature; stale evidence is rejected with reasons. A rejected completion decision
   is recorded and the run continues.
+- `review` is available only in research mode. It records interpretations and a direction without
+  changing the task graph; it cannot carry `tasks`. Use `dispatch`/`verify`/`replan` when work must
+  change.
 - `request_input` stops with a concrete question (`needs_input`). `pause` stops with a reason.
 - `request_context` pulls an artifact/evidence body into the next packet without executing another
   action. It supports `offset` and `limit`; long content is paged (`next_offset` in the packet),
@@ -373,7 +504,7 @@ input-heavy work where Claude reads short results instead of long documents.
 python3 -I -m unittest discover -s tests -v
 ```
 
-At the time of writing: **150 tests pass in about 34 s** on Python 3.13.15. They cover, among other
+At the time of writing: **211 tests pass in about 40 s** on Python 3.13.15. They cover, among other
 things:
 
 1. a first-round result changes the second-round task direction;
@@ -408,7 +539,23 @@ things:
 30. shared dependencies validate each incoming edge independently of cache traversal order;
 31. nonzero CLI exits fail while retaining usage, and quoted shell placeholders preserve filenames;
 32. startup configuration survives source-file removal, with external/auto CLI flows reusing it;
-33. code patches include worker commits relative to the recorded input baseline; renames check both paths, and dirty paths are parsed from Git porcelain output.
+33. code patches include worker commits relative to the recorded input baseline; renames check both paths, and dirty paths are parsed from Git porcelain output;
+34. a completed key experiment enters a pending research review even without an `against` label;
+35. implementation failures, measurement issues and prediction mismatch do not auto-refute a hypothesis;
+36. invalidated support keeps other valid support, and invalidated refutations retain history and require review;
+37. route switches preserve unrelated artifacts and distinguish `tests_hypotheses` from `depends_on_hypotheses`;
+38. duplicate same-source observations are not independent, and research progress ignores reason rewrites and duplicate IDs;
+39. research packet trimming/compression keeps hypothesis, pending-result and evidence references;
+40. legacy hypotheses/refutations migrate as `legacy/unassessed`; normal runs and completion/budget behavior remain unchanged;
+41. a combined research update plus `complete` is validated on the final state and rolled back whole when rejected;
+42. resolved review IDs cannot cover a newer pending result, invalidated interpretations cannot resolve one, and exact replays stay no-ops;
+43. deleting an artifact invalidates its observation before review, blocks new support, and can be closed through the invalidation event;
+44. a hypothesis version bump blocks dependent-task completion, and reworded rationales/directions do not reset no-progress detection.
+45. a combined `complete` applies research updates, propagates dependent-task changes and refreshes pending/validity before validation, then rolls back the whole decision on failure;
+46. a replayed research payload cannot authorize a new `dispatch`/`verify`/`repair`/`replan`, while exact review replay and batch review remain valid;
+47. `switch`/`narrow`/`pause` are investment-only, while explicit definition or status updates re-open dependent tasks;
+48. a `needs_review` task can be cancelled through `replan`, keeps its artifact/research history, and a replacement result can complete the goal;
+49. model-visible fixture case and option names are neutral, evaluator mappings retain labels, and initial text contains no future evidence ids or verdicts.
 
 The default suite never calls a paid API. Fake backends, temporary directories, scripted CLIs and
 real local subprocesses are used. These tests validate controller behavior; they are not a
@@ -569,7 +716,7 @@ python3 scripts/swarm_loop.py cancel runs/demo
 上限）；美元是软预算；未知价格/未知用量不会按零计算，未知调用有单独硬上限。价格表带来源和
 更新时间。
 
-**测试**：`python3 -I -m unittest discover -s tests -v`，当前 150 个离线测试全部通过（约 34 秒，
+**测试**：`python3 -I -m unittest discover -s tests -v`，当前 211 个离线测试全部通过（约 40 秒，
 Python 3.13.15），不调用付费 API。CI 在 `.github/workflows/tests.yml`。
 
 **基准**：`python3 benchmarks/harness.py --mode fake --include-claude-alone`。评分答案放在独立

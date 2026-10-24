@@ -117,6 +117,10 @@ def _print_status(summary: dict, as_json: bool = False) -> None:
           f"调用 {budget.get('calls', 0)}；tokens {budget.get('tokens', 0)}")
     if summary.get("packet"):
         print(f"决策材料: {summary['packet']}")
+    research = summary.get("research") or {}
+    if research.get("enabled"):
+        print(f"研究模式: 待审查 {research.get('pending_reviews', 0)}；"
+              f"假设 " + json.dumps(research.get("hypotheses") or {}, ensure_ascii=False))
     if summary.get("triggers"):
         print("触发: " + "；".join(
             f"{t.get('kind')}: {t.get('detail', '')}" for t in summary["triggers"]))
@@ -144,6 +148,8 @@ def cmd_start(args) -> int:
         workspace["isolate"] = args.isolate
     if args.allow_unversioned_code:
         workspace["require_git_for_code"] = False
+    if getattr(args, "research", False):
+        goal["research"] = True
     try:
         workspace = config_mod.validate_workspace(workspace)
     except config_mod.ConfigError as exc:
@@ -428,6 +434,8 @@ def main() -> int:
                    help="allow non-git code workspaces (no patch evidence)")
     s.add_argument("--mode", choices=("external", "auto"), default="external",
                    help="external host (default) or controller-driven planner")
+    s.add_argument("--research", action="store_true",
+                   help="enable the minimal research ledger and direction review")
     s.add_argument("--keep-sessions", action="store_true")
     common(s)
     s.set_defaults(func=cmd_start)
