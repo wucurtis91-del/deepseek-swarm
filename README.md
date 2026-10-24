@@ -1,7 +1,22 @@
 # deepseek-swarm
 
-Let one **Claude planner** keep deciding what to do next while **DeepSeek workers** execute, the
-controller checks results, and Claude continues, repairs, replans or stops when the goal is actually met.
+**English** · [简体中文](README.zh-CN.md)
+
+**Claude plans. DeepSeek executes. Verified results drive the next step.**
+
+A technical skill for Claude Code and Codex, with a standalone Python CLI for parallel tasks and
+persistent workflows. Reuse your current session as the planner, or let a configured Claude backend
+run the loop. The controller schedules work, checks artifacts, tracks budgets and keeps the state
+needed to continue, repair, replan or finish.
+
+[Quick start](#install) · [Persistent loop](#the-persistent-loop) · [Research mode](#optional-research-mode) · [Cost control](#context-and-cost-control) · [Examples](examples/loop/README.md) · [完整中文指南](README.zh-CN.md)
+
+## Choose a workflow
+
+- **Batch reading and extraction:** parallel workers turn long inputs into short, checkable results.
+- **Code and diagnostics:** investigate, implement in worktrees, run checks and repair from saved patches.
+- **Research and experiments:** preserve observations and hypothesis versions, review key results and
+  record whether to continue, test an alternative or change direction.
 
 There are two entry points:
 
@@ -10,7 +25,7 @@ There are two entry points:
 | `scripts/swarm.py` | The original one-shot runner: `check`, `plan`, `run`. Existing tasks files keep working. |
 | `scripts/swarm_loop.py` | The persistent decision loop: `start`, `next`, `decide`, `auto`, `status`, `resume`, `cancel`, `artifacts`, `validate`. |
 
-The loop is new; the old commands do not require migration. Standard library only, Python 3.9+.
+Existing one-shot task files keep working. Standard library only, Python 3.9+.
 
 ```
 Claude planner ──decision──► controller ──task batch──► DeepSeek workers
@@ -48,7 +63,18 @@ python3 ~/.claude/skills/deepseek-swarm/scripts/swarm.py check
 Claude Code CLI (`claude`), Python 3.9+, a DeepSeek key and (for automatic planning) a Claude
 backend are required.
 
-See [examples/loop/README.md](examples/loop/README.md) for a runnable offline multi-round demo and a real external-host walkthrough.
+Try the complete offline workflows first. These use fake backends and make no paid API calls:
+
+```bash
+cd ~/.claude/skills/deepseek-swarm
+bash examples/loop/fake/run-demo.sh
+bash examples/research/fake/run-demo.sh
+```
+
+For real work, copy `examples/loop/roles.example.json` to `roles.json`, configure the models and
+credentials available to your account, and define your goal and completion criteria in `goal.json`.
+Commands below run from the repository root. See [the loop walkthrough](examples/loop/README.md)
+for JSON examples and an external-host session.
 
 ## The persistent loop
 
@@ -131,7 +157,7 @@ second independent support.
 `tests_hypotheses` says what the experiment tests; `depends_on_hypotheses` says what must remain
 valid for the task result to be usable. The controller records the hypothesis versions a task
 depended on when it starts. If a definition or scope change bumps a hypothesis version, or an
-explicit `hypothesis_updates` status change marks the hypothesis `superseded`/`contradicted`,
+explicit `hypothesis_updates` entry changes its status,
 dependent tasks are marked `needs_review` and cannot be used to complete the goal until the
 dependency is handled; tasks that only tested the old hypothesis remain valid observations. A
 `switch`/`narrow` direction is an investment choice and does **not** change hypothesis status or
@@ -208,7 +234,7 @@ The research packet is bounded and includes active hypotheses, pending/reviewed 
 invalidated evidence references, source groups, recent reviews, totals for
 hypotheses/pending/invalidated/reviewed records, `pending_offset`/`pending_returned`,
 `next_offset`, `truncated_sections` and `limits`. Pending results are paginated; fetch
-another page with `context_requests: [{"research_page": N}]`. If even the minimum one-item structure
+another page with `context_requests: [{"research_page": N}]`. If the required structure, including an empty page,
 exceeds its budget, `limits.over_budget` is set and `limits.min_chars` reports the required space
 instead of silently pretending it fit. Trimming/compression must retain research IDs, statuses,
 hypothesis versions, pending evidence references and invalidation references; an empty, null,
@@ -495,8 +521,8 @@ rewrites the task and never becomes the source of truth.
 - a stale downstream result is not listed in `passed` and makes the command exit 1.
 
 The original benchmark in `benchmarks/2026-10-22-nodal-mesh.md` is still valid for the one-shot
-runner. It found that a small task did **not** save money overall; the swarm pays off on
-input-heavy work where Claude reads short results instead of long documents.
+runner. It found that a small task did **not** save money overall. Input-heavy work where the planner reads
+short results instead of long documents is a useful candidate for measuring savings.
 
 ## Tests
 
@@ -504,7 +530,7 @@ input-heavy work where Claude reads short results instead of long documents.
 python3 -I -m unittest discover -s tests -v
 ```
 
-At the time of writing: **211 tests pass in about 40 s** on Python 3.13.15. They cover, among other
+The offline suite covers the persistent workflow, research mode and pricing logic on Python 3.9+. They cover, among other
 things:
 
 1. a first-round result changes the second-round task direction;
@@ -584,7 +610,7 @@ extract task. Real mode uses one global call/USD ledger across all approaches; t
 remaining budget, the Claude-alone path is checked before its call, and the bounded legacy run is
 skipped if its upper bound exceeds the remaining call budget. Overshoot, if any, is reported.
 
-The offline results saved in `benchmarks/results/` show:
+Example output from the offline harness (fake backend):
 
 | Case | Approach | Quality | Calls | Cost (known) | Coverage |
 |---|---|---|---|---|---|
@@ -650,83 +676,16 @@ Python version, raw results and independent checks. Do not read savings into the
   zero cost. Verified by reservation and unknown-price tests.
 - **Optional critic** → challenges assumptions only on real triggers; it is not a second full run.
 
-## 中文说明
+## Documentation
 
-**两个入口**：旧的 `scripts/swarm.py check|plan|run` 保持兼容；新的持续工作流用
-`scripts/swarm_loop.py`，不要求旧用户迁移。
-
-**外部主持模式**（推荐先用）：
-
-```bash
-python3 scripts/swarm_loop.py start runs/demo --goal examples/loop/goal.json \
-    --config examples/loop/roles.example.json
-python3 scripts/swarm_loop.py next runs/demo
-# 当前 Claude 会话阅读决策材料，写出 decision.json
-python3 scripts/swarm_loop.py decide runs/demo decision.json
-python3 scripts/swarm_loop.py next runs/demo
-python3 scripts/swarm_loop.py status runs/demo
-python3 scripts/swarm_loop.py cancel runs/demo
-```
-
-外部 Claude 会话的 token 用量控制器看不到，会记为 `external_unmetered`，成本覆盖标为
-`partial`，不会当成零成本。
-
-**自动主持模式**：`auto runs/demo --max-steps 20`，由控制器通过配置的 Claude backend 调用
-主持者。规划者不可用时明确 `paused` 并停止，不会偷偷换模型。fake backend 只用于测试，命令行
-默认拒绝，必须显式 `--allow-fake-backend`。
-
-**决策**：`dispatch / repair / verify / replan / complete / request_input / pause`，可附带
-`request_context`。决策必须给出简短 `reason`、证据 ID、任务和下一步验收条件。任务必须说明
-`question`（解决什么未知）、`produces`（产物）、`decision_impact`（结果如何影响后续）。
-
-**完成判定**：`complete` 必须逐项覆盖目标完成条件，每条引用已完成任务的已验证产物证据。
-代码任务还必须有补丁、diff 哈希和路径范围合格。控制器在接受完成前沿依赖链递归核对当前和祖先
-任务的状态/版本、产物/补丁哈希、输入文件、验收标准；共享上游只检查一次，错误会带失效任务、
-文件和依赖路径。产物、补丁或输入变化后旧证据会被拒绝。外部和自动模式使用同一检查。
-
-**代码修复**：`repair` 默认把上一版补丁应用到当前输入基线，再启动 worker；最终 patch 是相对
-当前输入基线的完整结果，旧产物和旧补丁保留。上一版补丁冲突/缺失、基线变化、越界改动或上一版
-处于 `unknown`/`interrupted` 时，任务记录 `repair_inheritance`/`patch_conflict` 等明确状态，
-由主持者选择检查、修复或重规划；不会修改用户工作区。
-
-**摘要与上下文**：主持者每轮只看决策材料（目标、当前摘要、新证据、产物引用/哈希、未解决
-问题、分歧、预算、需要做的决定），不附全部历史和全文。需要全文时用 `request_context`，支持
-`offset`/`limit` 分页；明确请求的正文即使让材料超出软上限也会保留。**模型**：task.model 会真正
-传给 backend，并用于身份校验、预算和计价，而不只是记在 fake 返回值里。
-
-**状态与恢复**：每个 run 有 `run_id`、`state.json`、带哈希链的 `events.jsonl`、产物、决策
-和包。事件增量相对上一次已提交快照计算；快照损坏时可从任务/证据/预算/决策事件恢复；截断的
-日志尾部会在下次写入前修复。原子写入，单写者锁。中断时正在执行的任务标为 `interrupted` 或
-`unknown`，不自动重放。
-上游或输入变化会让下游变 `stale`，旧证据不能再用于完成。
-
-**验收**：`deterministic / semantic / combined / none`。复核必须覆盖全部验收标准 id，布尔值
-必须是真的布尔；缺标准、errors 非空、只返回 `pass:true` 都不能通过。复核服务失败是
-`review_unavailable`，不是普通未复核成功。写测试的任务可用 `negative_check`：在副本中注入已知
-错误，要求测试能检出该错误并失败。
-
-**代码任务**：只支持 `isolate=worktree`，其他值在启动前报错；在独立 git worktree 中执行；
-上游补丁先应用并提交为 `input_commit`，任务自己的 patch 只包含相对该基线的增量；
-`repair` 先继承上一版补丁，最终 patch 仍是相对当前输入基线的完整结果；记录 diff/patch、改动
-文件、测试、越界文件和原始基线 commit；独立写任务之间会检测补丁冲突；路径检查是验收，不是
-沙箱。非 git 且关闭 git 要求时退回文件快照，写入串行且没有 patch 完成证据。
-
-**预算**：`max_seconds` 是停止新增调用的运行预算，在途进程按自身 `timeout` 或取消结束；调用
-次数和轮次也限制新增工作。token 是估算预算（一次 CLI 调用可包含多轮工具调用，不能当成硬 token
-上限）；美元是软预算；未知价格/未知用量不会按零计算，未知调用有单独硬上限。价格表带来源和
-更新时间。
-
-**测试**：`python3 -I -m unittest discover -s tests -v`，当前 211 个离线测试全部通过（约 40 秒，
-Python 3.13.15），不调用付费 API。CI 在 `.github/workflows/tests.yml`。
-
-**基准**：`python3 benchmarks/harness.py --mode fake --include-claude-alone`。评分答案放在独立
-grader，不写进目标/任务；legacy diagnostic 依赖 extract；real 模式整次运行共用一个预算和用量
-账本。默认 fake 只证明控制逻辑和指标采集，不证明真实模型更聪明或更省钱；真实评测需显式
-`--mode real --config ... --i-understand-this-spends --max-usd ...`。
-
-**限制**：不是完整沙箱，不承诺任意 shell 的 exactly-once，没有网页后台/分布式/多用户，
-供应商适配范围窄，外部主持者用量不可计量，模型价格会变。
+- [简体中文：完整入门与使用指南](README.zh-CN.md)
+- [Planner skill guide](SKILL.md)
+- [Loop examples](examples/loop/README.md)
+- [Research examples](examples/research/README.md)
+- [Research evaluation fixtures](benchmarks/research/README.md)
 
 ## License
 
-MIT
+[MIT](LICENSE)
+
+**English** · [简体中文](README.zh-CN.md)
