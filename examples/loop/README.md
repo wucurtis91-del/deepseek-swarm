@@ -13,8 +13,8 @@ It runs external-host mode with fake backends:
 3. the next packet contains the verified artifact/evidence;
 4. the second `decide` submits `complete`, and the controller validates the goal criteria.
 
-This proves the loop, state and protocol. It does not show that a real model is smarter or cheaper.
-The fake config must be explicitly allowed: the real CLI refuses fake backends by default.
+The demo exercises the loop, state and protocol with scripted responses.
+Use `--allow-fake-backend` with the fake configuration.
 
 ## Real external-host mode
 
@@ -49,7 +49,7 @@ python3 scripts/swarm_loop.py auto runs/auto --max-steps 20
 ```
 
 The planner call goes through the configured Claude backend. If the backend is unavailable or its
-identity does not match the configuration, the run stops; it never silently falls back.
+identity does not match the configuration, the run stops and records the reason.
 
 ## Goal file
 

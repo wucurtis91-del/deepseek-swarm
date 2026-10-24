@@ -29,6 +29,7 @@ TASK_STATUSES = {
     "pending", "running", "completed", "unverified", "exec_failed",
     "interrupted", "unknown", "blocked", "stale", "cancelled", "review_unavailable",
     "review_invalid", "unreviewed", "budget_blocked", "patch_conflict",
+    "needs_review",
 }
 
 

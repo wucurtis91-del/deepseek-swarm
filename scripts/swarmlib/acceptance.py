@@ -513,7 +513,7 @@ def _evidence_refresh_errors(state: dict, ev: dict, cid: str,
 
 def validate_completion(state: dict, decision: dict,
                         run_dir: Path | None = None) -> tuple[bool, list[str]]:
-    """A model saying complete is not success; each goal criterion needs verified evidence."""
+    """Validate completion from current, verified evidence for every goal criterion."""
     goal = state.get("goal") or {}
     goal_ids = [c["id"] for c in goal.get("criteria", [])]
     entries = {e["criterion"]: e for e in decision.get("completion", [])}

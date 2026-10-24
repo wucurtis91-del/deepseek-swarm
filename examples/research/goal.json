@@ -1,0 +1,13 @@
+{
+  "goal": "Determine whether mechanism A or mechanism B explains the observed effect under the stated conditions.",
+  "constraints": [
+    "Use only the supplied observations and executable checks.",
+    "Record interpretations separately from task completion.",
+    "Do not change the goal without user input."
+  ],
+  "completion_criteria": [
+    {"id": "g1", "text": "The direction decision and supporting evidence are recorded, and the goal's stated criterion is assessed."}
+  ],
+  "research": true,
+  "workspace": {"repo": null, "isolate": "worktree"}
+}

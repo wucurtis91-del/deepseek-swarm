@@ -26,6 +26,7 @@ PLANNER_RULES = """\
 - verify：补充一个能区分答案的验证任务（不要重复原任务）。
 - replan：假设被否定、方法不可行或任务定义有问题；修改任务图、取消未执行任务。
 - complete：目标完成。必须逐项给出完成条件的证据 ID；控制器按当前验收证据判定完成状态。
+- review：仅研究模式。解释待审查观察并记录方向，不创建任务；不要用它伪造 task。
 - request_input：确实缺少只有用户能提供的信息；必须给出具体问题。
 - request_context：需要某个产物的完整正文或某条证据时使用；控制器会把内容附到下一份材料，不执行其他动作。
 - pause：因预算或明确条件停止派发。
@@ -42,6 +43,16 @@ PLANNER_RULES = """\
 - 不要输出逐字思维链，reason 只写简短依据。
 - 代码任务必须声明 allowed_paths；独立写任务会使用 git worktree，路径检查是验收的一部分。
 - 如果需要某个产物的完整内容，在 context_requests 里请求（最多 4 个），控制器会重新给你一份材料。
+- 研究模式：pending key/prediction 结果必须先解释 observation 并记录 direction；解释用
+  supports/against/inconclusive/mixed，必须引用相关假设的当前版本，不要把一次实现失败自动当成
+  假设被否定；切换/暂停可以有成本或替代路线理由，不要求负结果；单假设校准/复现实验合法。
+  review 不带 tasks，只能用当前 pending 的 review id；已 resolved 的 id 不能覆盖新事件；旧的
+  research payload 重放不能给新的 dispatch/verify/repair/replan 当审查许可。
+  complete 在仍有 pending 时会被拒绝；complete 可与 research 同行，但会先传播依赖变化并刷新
+  pending/有效性，再按最终状态校验，失败会整条回滚。switch/narrow/pause 只是投入方向，不改
+  假设状态或依赖任务资格；显式有效性变化请用 hypothesis_updates。needs_review 任务可用
+  replan.cancel 放弃并用替代任务完成。解释可用 supersedes 修正同一 observation、版本和条件下
+  的旧解释；失效 observation 只能用 inconclusive 收尾，或审查 evidence_invalidated 事件。
 
 只输出一个 JSON 对象，字段：
 {"action": "...", "reason": "...", "evidence": ["ev-..."],
@@ -50,7 +61,15 @@ PLANNER_RULES = """\
  "hypotheses": [{"id": "h1", "text": "..."}],
  "refuted": [{"id": "h1", "reason": "...", "evidence": ["ev-..."]}],
  "open_questions": ["..."], "recommendations": ["..."], "next_acceptance": ["..."],
- "context_requests": [{"artifact": "task-id@v1"}],
+ "context_requests": [{"artifact": "task-id@v1"}, {"research_page": 0}],
+ "research": {"review_ids": ["rr-..."],
+              "interpretations": [{"observation": "obs-...", "hypothesis": "h1",
+                                   "hypothesis_version": 1, "relation": "supports|against|inconclusive|mixed",
+                                   "conditions": "...", "rationale": "...", "source": "planner"}],
+              "hypothesis_updates": [{"id": "h1", "text": "...", "scope": "...", "version": 1,
+                                      "status": "open|supported|contested|contradicted|inconclusive|superseded"}],
+              "direction": {"choice": "continue|experiment|narrow|switch|pause|stop",
+                            "hypothesis": "h1", "alternatives": ["h2"], "reason": "..."}},
  "question": "...", "summary": "..."}
 
 任务对象（dispatch/replan/verify 使用）：
@@ -64,6 +83,9 @@ PLANNER_RULES = """\
                     "check": "unit", "note": "故意引入已知错误，测试必须失败"},
  "allowed_paths": ["src/x.py", "tests/**"],
  "depends_on": ["上游任务 id"], "satisfies": ["g1"],
+ "tests_hypotheses": ["h1"], "depends_on_hypotheses": ["h1"],
+ "key_experiment": true,
+ "research_prediction": {"hypothesis": "h1", "check": "unit", "expect_exit": 0},
  "max_chars": 800, "input_files": ["data/a.csv"]}
 
 注意：
@@ -95,9 +117,10 @@ COMPRESS_RULES = """\
 - 全部完成条件 id 和它们的状态；
 - 全部证据 id、产物引用和哈希；
 - 全部未解决问题、反证、分歧和失败；
+- 研究模式的全部 pending id/状态/证据引用、假设 id/版本/状态和失效观察引用；
 - 预算消耗。
-只能删掉重复措辞和已解决的旧细节。不要新增内容，不要改变任何 id 或结论。
-输出同一结构的 JSON 对象。"""
+只能删掉重复措辞和已解决的旧细节。不要新增内容，不要改变任何 id 或结论，不要把 research
+删成空对象、null 或其他结构。输出同一结构的 JSON 对象。"""
 
 
 def acceptance_block(task: dict) -> str:
