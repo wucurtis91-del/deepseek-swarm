@@ -278,7 +278,8 @@ class CheckCmd(Base):
         self.assertEqual((rec["status"], rec["verified_by"]), ("ok", "check_cmd"))
         self.assertEqual(rec["check"]["exit"], 0)
         self.assertEqual(r.count("review"), 0)
-        self.assertIn("## 检查命令", r.calls[0][1])        # the worker knows what will be run
+        self.assertIn("## 程序检查", r.calls[0][1])        # the worker knows a check will run
+        self.assertNotIn("exit 0", r.calls[0][1])          # but not which command
 
     def test_failing_check_goes_back_with_its_output(self):
         cmd = "test -f done.flag || { echo 'AssertionError: 2 != 3'; touch done.flag; exit 1; }"
@@ -300,7 +301,7 @@ class CheckCmd(Base):
         r = FakeRunner(args(), worker=[ok("v1")], review=[ok(PASS)])
         rec = swarm.run_task(self.task(check_cmd="true"), "", r, self.out)
         self.assertEqual((rec["status"], rec["verified_by"]), ("ok", "review+check_cmd"))
-        self.assertIn("程序已运行", next(p for k, p, _ in r.calls if k == "review"))
+        self.assertIn("程序检查已通过", next(p for k, p, _ in r.calls if k == "review"))
 
     def test_check_timeout_stops_the_command(self):
         r = FakeRunner(args(max_rework=0), worker=[ok("v1")])
@@ -314,6 +315,67 @@ class CheckCmd(Base):
         r = FakeRunner(args(), worker=[ok("最终答案：42")])
         rec = swarm.run_task(self.task(acceptance=[], check_cmd="grep -q 42 {result}"), "", r, self.out)
         self.assertEqual(rec["status"], "ok")
+
+
+class CheckStaysWithPlanner(Base):
+    """The check command can name a grader or an answer key: workers and reviewers never see it."""
+    SECRET = "/somewhere/key/answer_key.json"
+
+    def secret_task(self, **kw):
+        return self.task(check_argv=["sh", "-c", "test -f done.flag || { touch done.flag; exit 1; }",
+                                     self.SECRET], **kw)
+
+    def test_no_prompt_names_the_command(self):
+        r = FakeRunner(args(), worker=[ok("v1"), ok("v2")], review=[ok(PASS)])
+        rec = swarm.run_task(self.secret_task(), "", r, self.out)
+        self.assertEqual((rec["status"], rec["rounds"]), ("ok", 2))
+        for kind, prompt, _ in r.calls:
+            self.assertNotIn(self.SECRET, prompt, kind)
+            self.assertNotIn("done.flag", prompt, kind)
+        verdict = json.loads((self.out / "q1.v1.review.json").read_text())
+        self.assertNotIn(self.SECRET, json.dumps(verdict, ensure_ascii=False))
+        self.assertIn(self.SECRET, rec["check"]["command"])     # the planner still has it
+
+    def test_check_text_follows_the_tools(self):
+        t = self.secret_task()
+        none = swarm.worker_prompt(t, "", tools="none")
+        read = swarm.worker_prompt(t, "", tools="read")
+        bash = swarm.worker_prompt(t, "", tools="bash")
+        self.assertIn("没有任何工具", none)
+        self.assertIn("不能运行命令", read)
+        self.assertIn("你有 Bash", bash)
+        for prompt in (none, read, bash):
+            self.assertNotIn(self.SECRET, prompt)
+            self.assertNotIn("运行一遍", prompt)
+
+
+TOOL_TEXT = ('<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name="Bash">\n'
+             '<｜｜DSML｜｜ parameter name="command" string="true">cat key.json</｜｜DSML｜｜ parameter>\n'
+             '</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>')
+
+
+class ToolCallText(Base):
+    def test_detects_written_out_tool_calls(self):
+        for text in (TOOL_TEXT, '<function_calls><invoke name="Read">', "<tool_call>{}"):
+            self.assertTrue(swarm.is_tool_call_text(text), text)
+        self.assertFalse(swarm.is_tool_call_text("Q1: 10-01 22:05 | 首次超差"))
+
+    def test_tool_text_is_retried_not_shrunk_checked_or_reviewed(self):
+        r = FakeRunner(args(), worker=[ok(TOOL_TEXT), ok("答案 42")], review=[ok(PASS)])
+        rec = swarm.run_task(self.task(max_chars=5, check_cmd="grep -q 42 {result}"), "", r, self.out)
+        self.assertEqual((rec["status"], rec["rounds"]), ("ok", 1))
+        self.assertEqual(rec["tool_text_retries"], 1)
+        self.assertEqual(r.count("shrink"), 0)
+        self.assertIn("工具调用文本", r.calls[1][1])
+        self.assertEqual((self.out / "q1.md").read_text(), "答案 42")
+
+    def test_repeated_tool_text_fails_without_a_result(self):
+        r = FakeRunner(args(retries=1), worker=[ok(TOOL_TEXT), ok(TOOL_TEXT)])
+        rec = swarm.run_task(self.task(max_chars=5, check_cmd="exit 0"), "", r, self.out)
+        self.assertEqual(rec["status"], "failed")
+        self.assertIn("工具调用文本", rec["error"])
+        self.assertEqual((r.count("worker"), r.count("shrink"), r.count("review")), (2, 0, 0))
+        self.assertFalse((self.out / "q1.md").exists())
 
 
 class Inputs(unittest.TestCase):

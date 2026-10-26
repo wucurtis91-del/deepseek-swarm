@@ -344,14 +344,34 @@ def check_label(task: dict) -> str:
     return task.get("check_cmd") or " ".join(task.get("check_argv") or [])
 
 
-def check_block(task: dict) -> str:
-    cmd = task.get("check_cmd") or " ".join(task.get("check_argv") or [])
-    if not cmd:
+def check_block(task: dict, tools: str | None = None) -> str:
+    # The command itself stays with the planner: it can name a grader or an answer key,
+    # and in a 2026-10-26 run workers spent whole rounds trying to open them.
+    if not has_check(task):
         return ""
-    form = "参数数组（不经过 shell）" if task.get("check_argv") else "shell 命令"
-    return ("## 检查命令\n你交回后，程序会在工作目录运行下面的检查（" + form + "），退出码为 0 才算通过；"
-            "没通过会把输出打回给你修改。有 Bash 工具就先自己运行一遍，没有就在交回前仔细核对。\n"
-            f"```\n{cmd}\n```")
+    text = ("## 程序检查\n你交回后，程序会自动检查结果，没通过会把检查输出打回给你修改。"
+            "检查用的命令和文件不会给你，也不要去找。")
+    if tools == "bash":
+        return text + "你有 Bash，可以先运行你自己写的测试。"
+    if tools == "none":
+        return text + "你没有任何工具：不要输出工具调用，直接在正文里交回结果，交回前自己仔细核对。"
+    return text + "你不能运行命令：不要输出工具调用，交回前自己仔细核对。"
+
+
+# A worker without the tool it wants sometimes writes the call out as text, e.g.
+# DeepSeek's "<｜｜DSML｜｜ invoke ...>". That is not a result and must not be shrunk,
+# checked or reviewed.
+TOOL_CALL_TEXT = re.compile(
+    r"<[｜|]+\s*DSML\s*[｜|]+|<function_calls>|<tool_call>|<invoke\s+name=|antml:invoke")
+
+TOOL_TEXT_RETRY = """\
+## 注意
+你上一次交回的是一段工具调用文本，不是结果。这一步不能调用这个工具。
+直接在正文里交回结果。"""
+
+
+def is_tool_call_text(text: str) -> bool:
+    return bool(TOOL_CALL_TEXT.search(text or ""))
 
 
 def upstream_block(task: dict, deps: dict, out: Path) -> str:
@@ -369,7 +389,7 @@ def upstream_block(task: dict, deps: dict, out: Path) -> str:
 
 
 def worker_prompt(task: dict, shared: str, prev: str | None = None, review: dict | None = None,
-                  limit: int | None = None) -> str:
+                  limit: int | None = None, tools: str | None = None) -> str:
     parts = [WORKER_RULES]
     if shared:
         parts.append("## 共同背景\n" + shared.strip())
@@ -381,7 +401,7 @@ def worker_prompt(task: dict, shared: str, prev: str | None = None, review: dict
     if limit:
         parts.append(length_block(limit))
     if has_check(task):
-        parts.append(check_block(task))
+        parts.append(check_block(task, tools))
     if prev is not None:
         parts.append(REWORK_RULES)
         parts.append("## 你上一版的结果\n" + prev)
@@ -414,7 +434,7 @@ def review_prompt(task: dict, shared: str, result: str, limit: int | None = None
         parts.append(f"## 篇幅\n程序已检查：正文 {count_chars(result)} 字，上限 {limit} 字，符合。"
                      "涉及字数的验收标准直接判满足，不要自己数字数。")
     if has_check(task):
-        parts.append(f"## 检查命令\n程序已运行 `{check_label(task)}`，通过（退出码 0）。不用重复这项检查。")
+        parts.append("## 程序检查\n程序检查已通过（退出码 0）。不用重复这项检查，也不要去找检查用的命令和文件。")
     parts.append("## 执行者交回的结果\n" + result)
     return "\n\n".join(parts)
 
@@ -695,7 +715,16 @@ def run_task(task: dict, shared: str, runner: Runner, out: Path) -> dict:
     for rnd in range(1, a.max_rework + 2):
         rec["rounds"] = rnd
         log(f"[{tid}] 第 {rnd} 轮：执行")
-        res = attempt(worker_prompt(task, shared, prev, review, limit), tools, model, "执行")
+        prompt = worker_prompt(task, shared, prev, review, limit, tools)
+        res = attempt(prompt, tools, model, "执行")
+        for i in range(max(a.retries, 0)):
+            if not (res["ok"] and is_tool_call_text(res["text"])):
+                break
+            rec["tool_text_retries"] = rec.get("tool_text_retries", 0) + 1
+            log(f"[{tid}] 第 {rnd} 轮交回的是工具调用文本，重新执行（第 {i + 1} 次）")
+            res = attempt(prompt + "\n\n" + TOOL_TEXT_RETRY, tools, model, "执行")
+        if res["ok"] and is_tool_call_text(res["text"]):
+            res = {"ok": False, "error": "执行者交回的是工具调用文本，不是结果"}
         if not res["ok"]:
             rec["error"] = res["error"]
             break
@@ -716,12 +745,13 @@ def run_task(task: dict, shared: str, runner: Runner, out: Path) -> dict:
             log(f"[{tid}] 第 {rnd} 轮：运行检查命令")
             ck = run_check(task, cwd, result_path)
             rec["check"] = {k: ck[k] for k in ("pass", "exit", "seconds")}
+            rec["check"]["command"] = check_label(task)
             if not ck["pass"]:
                 how = "超时" if ck["exit"] is None else f"退出码 {ck['exit']}"
                 review = {"pass": False, "checked_by": "check_cmd",
-                          "errors": [f"检查命令没通过（{how}）：{check_label(task)}"],
+                          "errors": [f"程序检查没通过（{how}）"],
                           "check_output": ck["output"],
-                          "fix_instructions": "看 check_output 里的报错，只改你这个任务负责的文件，让检查命令通过。"}
+                          "fix_instructions": "看 check_output 里的报错修改结果，让程序检查通过。只改你这个任务负责的文件。"}
 
         if review is None and not do_review:
             if has_check(task):
@@ -1168,7 +1198,8 @@ def cmd_plan(args) -> int:
         if t is None:
             sys.exit(f"没有 id 为 {args.show} 的任务")
         print(f"\n--- {t['id']} 的执行者 prompt（上游结果要到运行时才有）---")
-        print(worker_prompt(t, shared, limit=t.get("max_chars", args.max_chars)))
+        print(worker_prompt(t, shared, limit=t.get("max_chars", args.max_chars),
+                            tools=t.get("tools", getattr(args, "tools", "read"))))
     return 0
 
 
