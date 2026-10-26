@@ -5,9 +5,11 @@ import copy
 from pathlib import Path
 
 from . import util
+from . import research as researchmod
 
 BAD_STATUSES = ("unverified", "exec_failed", "review_unavailable", "review_invalid",
-                "interrupted", "unknown", "blocked", "stale", "patch_conflict", "budget_blocked")
+                "interrupted", "unknown", "blocked", "stale", "patch_conflict",
+                "budget_blocked", "needs_review")
 
 
 def _task_counts(tasks: dict) -> dict:
@@ -182,11 +184,14 @@ def build_packet(state: dict, max_chars: int = 30000, run_dir=None) -> dict:
         "roles": state.get("roles_summary") or {},
         "decision_needed": {
             "triggers": state.get("triggers") or [],
-            "allowed_actions": sorted(["dispatch", "repair", "verify", "replan",
-                                       "complete", "request_input", "pause",
-                                       "request_context"]),
-            "note": ("目标完成必须逐项引用已验证证据；模型自称完成不算。"
-                     "简单问题可以只派一个任务；局部错误用 repair，方向错误用 replan。"),
+            "allowed_actions": sorted(
+                ["dispatch", "repair", "verify", "replan", "complete",
+                 "request_input", "pause", "request_context"]
+                + (["review"] if state.get("research_mode") else [])),
+            "note": ("目标完成必须逐项引用当前已验证证据并由控制器校验。"
+                     "简单问题可以只派一个任务；局部错误用 repair，方向错误用 replan。"
+                     + (" 研究模式：review 只更新研究判断，不创建任务。"
+                        if state.get("research_mode") else "")),
         },
         "available_context": [
             {"ref": a["ref"], "chars": a["chars"], "sha256": a["sha256"],
@@ -200,6 +205,9 @@ def build_packet(state: dict, max_chars: int = 30000, run_dir=None) -> dict:
         } for d in (state.get("decisions") or [])[-5:]],
         "external_planner_unmetered": (state.get("budget") or {}).get("external_unmetered", 0),
     }
+    if state.get("research_mode"):
+        packet["research"] = researchmod.packet_section(
+            state, int(min(8000, max(1200, max_chars // 4))))
     # Deterministic trimming: optional fields go first; unresolved evidence is kept.
     text = util.canonical(packet)
     if len(text) > max_chars:

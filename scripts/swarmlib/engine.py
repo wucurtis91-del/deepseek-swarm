@@ -13,7 +13,8 @@ import traceback
 from pathlib import Path
 
 from . import acceptance, artifacts, budget as budgetmod, config as cfgmod
-from . import packet as packetmod, prompts, protocol, security, state as statemod, util
+from . import packet as packetmod, prompts, protocol, research as researchmod
+from . import security, state as statemod, util
 
 
 def count_chars(text: str) -> int:
@@ -128,6 +129,9 @@ class Engine:
             "question": None,
             "acceptance_history": [],
         }
+        research_enabled = bool(goal.get("research")
+                                or self.cfg.get("loop", {}).get("research_mode", False))
+        researchmod.ensure(state, research_enabled)
         self.state = state
         self.workspace = ws
         with self.store.lock():
@@ -140,6 +144,7 @@ class Engine:
     def open(self) -> dict:
         self.state = self.store.load()
         self._committed_state = copy.deepcopy(self.state)
+        self._ensure_research_state()
         wc = self.state.get("workspace_config") or {}
         wc = cfgmod.validate_workspace(wc)
         self.workspace = artifacts.Workspace(
@@ -152,6 +157,51 @@ class Engine:
             self.cfg.get("prices", cfgmod.PRICES), snapshot=snap,
             started_at=snap.get("started_at"))
         return self.state
+
+    def _research_enabled(self) -> bool:
+        return bool(self.state.get("research_mode")
+                    or self.cfg.get("loop", {}).get("research_mode", False)
+                    or (self.state.get("goal") or {}).get("research", False))
+
+    def _ensure_research_state(self) -> None:
+        if not self._research_enabled():
+            self.state["research_mode"] = False
+            return
+        researchmod.ensure(self.state, True)
+
+    def _migrate_research_state(self) -> None:
+        self._ensure_research_state()
+        if self.state.get("research_mode"):
+            researchmod.migrate(self.state)
+
+    def _refresh_research(self) -> None:
+        if self._research_enabled():
+            researchmod.refresh(self.state, int(self.state.get("round", 0)))
+
+    def _prepare_research_view(self) -> None:
+        if not self._research_enabled():
+            return
+        self._check_staleness()
+        cache = {}
+
+        def validate_task(task_id):
+            # Reuse the same artifact/patch/input/dependency-chain validator
+            # used by completion, with one cache per refresh pass. The expected
+            # status is the task's own: a needs_review/stale status may have been
+            # set by the research layer itself, and must not be mistaken for a
+            # broken artifact here.
+            task = (self.state.get("tasks") or {}).get(task_id) or {}
+            return acceptance._task_record_defects(
+                self.state, task_id, self.store.dir, cache,
+                {"status": task.get("status")})
+
+        researchmod.refresh(self.state, int(self.state.get("round", 0)),
+                            validator=validate_task)
+
+    def _invalidate_research_evidence(self, evidence_id: str, reason: str) -> None:
+        if self._research_enabled():
+            researchmod.invalidate_evidence(
+                self.state, evidence_id, reason, int(self.state.get("round", 0)))
 
     def commit(self, event_type: str, data: dict | None = None, summary: str = "") -> None:
         self.state["budget"] = self.budget.snapshot()
@@ -195,6 +245,8 @@ class Engine:
             return packet
         required = ("goal", "state_summary", "new_evidence", "unresolved",
                     "disagreements", "budget", "decision_needed")
+        if "research" in packet:
+            required += ("research",)
         if any(k not in candidate for k in required):
             packet["packet_meta"]["compression"] = "rejected: missing required sections"
             return packet
@@ -240,21 +292,46 @@ class Engine:
             if item.get("reason") and other.get("reason") != item.get("reason"):
                 packet["packet_meta"]["compression"] = "rejected: refutation reason changed"
                 return packet
+        if "research" in packet:
+            candidate_research = candidate.get("research")
+            if not isinstance(packet.get("research"), dict) \
+                    or not isinstance(candidate_research, dict):
+                packet["packet_meta"]["compression"] = \
+                    "rejected: research section missing or empty"
+                return packet
+            try:
+                if not candidate_research.get("enabled") or \
+                        researchmod.packet_signature(packet["research"]) != \
+                        researchmod.packet_signature(candidate_research):
+                    packet["packet_meta"]["compression"] = \
+                        "rejected: research ids/status/references changed"
+                    return packet
+            except (KeyError, TypeError, AttributeError):
+                packet["packet_meta"]["compression"] = "rejected: research shape changed"
+                return packet
         new_chars = len(util.canonical(candidate))
-        if new_chars >= chars:
+        original_chars = len(util.canonical(packet))
+        if new_chars >= original_chars:
             packet["packet_meta"]["compression"] = "rejected: not smaller"
             return packet
         candidate["packet_meta"] = dict(packet["packet_meta"])
         candidate["packet_meta"].update({
-            "compressed": True, "original_chars": chars, "chars": new_chars,
+            "compressed": True, "original_chars": original_chars, "chars": new_chars,
             "est_tokens": util.estimate_tokens(util.canonical(candidate)),
         })
+        final_chars = len(util.canonical(candidate))
+        if final_chars >= original_chars:
+            packet["packet_meta"]["compression"] = "rejected: not smaller"
+            return packet
+        candidate["packet_meta"]["chars"] = final_chars
         return candidate
 
     def _build_and_store_packet(self) -> dict:
         if self.state.get("status") in ("complete", "paused", "needs_input", "cancelled",
                                         "paused_budget", "paused_no_progress"):
             return {}
+        if self._research_enabled():
+            self._prepare_research_view()
         packet = packetmod.build_packet(
             self.state, int(self.cfg.get("loop", {}).get("packet_max_chars", 30000)),
             run_dir=self.store.dir)
@@ -622,6 +699,11 @@ class Engine:
         task["run_ctx"] = job["ctx"]
         task["dep_versions"] = job["dep_versions"]
         task["input_hashes"] = job["input_hashes"]
+        task["hypothesis_versions"] = {
+            hid: self.state["hypotheses"][hid]["version"]
+            for hid in task.get("depends_on_hypotheses") or []
+            if hid in (self.state.get("hypotheses") or {})
+        }
         task["config_fingerprint"] = {
             "worker": self.roles["worker"].fingerprint(),
             "reviewer": self.roles["reviewer"].fingerprint(),
@@ -1044,6 +1126,8 @@ class Engine:
             record.update(extra)
         self.state["evidence"][ev_id] = record
         task.setdefault("evidence_ids", []).append(ev_id)
+        if self._research_enabled():
+            researchmod.observation(self.state, task, record)
         return ev_id
 
     def _apply_result(self, result: dict) -> None:
@@ -1135,6 +1219,22 @@ class Engine:
                 verified=(review_outcome == "passed"), criteria=criteria,
                 review_outcome=review_outcome,
                 output="\n".join((task.get("review") or {}).get("errors") or []))
+        if self._research_enabled():
+            artifact_evidence = next(
+                (self.state["evidence"][eid] for eid in reversed(task.get("evidence_ids") or [])
+                 if eid in self.state["evidence"]
+                 and self.state["evidence"][eid].get("kind") == "artifact"), None)
+            if artifact_evidence:
+                researchmod.key_result(self.state, task, artifact_evidence,
+                                       int(self.state.get("round", 0)))
+                prediction = task.get("research_prediction") or {}
+                if prediction:
+                    check = next((c for c in (task.get("acceptance_result") or {}).get("checks") or []
+                                  if c.get("name") == prediction.get("check")), None)
+                    if check and check.get("exit") != prediction.get("expect_exit"):
+                        researchmod.prediction_mismatch(
+                            self.state, task, artifact_evidence, check,
+                            int(self.state.get("round", 0)))
         if task["status"] == "completed":
             self.state.setdefault("facts", []).append({
                 "id": f"fact-{len(self.state.get('facts') or []) + 1}",
@@ -1159,15 +1259,20 @@ class Engine:
     # ------------------------------------------------------------ staleness
     def _progress_fp(self) -> str:
         tasks = self.state.get("tasks") or {}
-        return util.hash_obj({
-            "evidence_seq": self.state.get("evidence_seq", 0),
+        execution = {
             "completed": sorted(
                 (t["id"], t.get("result_version"), (t.get("artifact") or {}).get("sha256"))
                 for t in tasks.values() if t.get("status") == "completed"),
             "acceptance": sorted(
                 (t["id"], acceptance.criteria_signature(t.get("acceptance") or []))
                 for t in tasks.values()),
-        })
+        }
+        if self._research_enabled():
+            return util.hash_obj({
+                "execution": execution,
+                "research": researchmod.progress_fp(self.state),
+            })
+        return util.hash_obj({"evidence_seq": self.state.get("evidence_seq", 0), **execution})
 
     def _check_staleness(self) -> None:
         changed = True
@@ -1210,10 +1315,15 @@ class Engine:
                         if ev.get("task") == task["id"]:
                             ev["verified"] = False
                             ev["stale"] = True
+                            if self._research_enabled():
+                                self._invalidate_research_evidence(
+                                    ev["id"], task.get("stale_reason") or "任务失效")
                     changed = True
         if any(t.get("status") == "stale" for t in self.state["tasks"].values()):
             self.state["triggers"] = [{"kind": "stale_inputs",
                                        "detail": "有任务因上游或输入变化被标记 stale，旧结果不能直接沿用"}]
+        if self._research_enabled():
+            researchmod.refresh(self.state, int(self.state.get("round", 0)))
 
     # ------------------------------------------------------------ triggers
     def _compute_triggers(self, executed: int) -> None:
@@ -1225,7 +1335,8 @@ class Engine:
             triggers.append({"kind": "initial_planning", "detail": "还没有任务"})
         bad = [t for t in tasks.values() if t.get("status") in (
             "unverified", "exec_failed", "review_unavailable", "review_invalid",
-            "interrupted", "unknown", "blocked", "stale", "patch_conflict")]
+            "interrupted", "unknown", "blocked", "stale", "patch_conflict",
+            "needs_review")]
         if bad:
             triggers.append({"kind": "task_failure",
                              "detail": "、".join(f"{t['id']}:{t['status']}" for t in bad[:12])})
@@ -1265,6 +1376,19 @@ class Engine:
         if self.state.get("open_questions"):
             triggers.append({"kind": "open_questions",
                              "detail": f"{len(self.state['open_questions'])} 个未解决问题"})
+        if self._research_enabled():
+            research_pending = researchmod.pending(self.state)
+            if research_pending:
+                triggers.append({
+                    "kind": "research_review_pending",
+                    "detail": "、".join(p["id"] + ":" + str(p.get("trigger"))
+                                       for p in research_pending[:8]),
+                })
+            reviewed = [h["id"] for h in (self.state.get("hypotheses") or {}).values()
+                        if h.get("status") == "needs_review"]
+            if reviewed:
+                triggers.append({"kind": "research_recheck",
+                                 "detail": "需要复审的假设：" + "、".join(reviewed[:12])})
         changed_roles = []
         stored = self.state.get("roles_summary") or {}
         for name in ("planner", "worker", "reviewer", "critic"):
@@ -1357,6 +1481,125 @@ class Engine:
     # ------------------------------------------------------------ decisions
     def validate_decision(self, decision: dict) -> None:
         tasks = self.state["tasks"]
+        if decision["action"] == "review" and not self._research_enabled():
+            raise protocol.DecisionError("review 只在 research_mode 下可用")
+        if decision.get("research") and not self._research_enabled():
+            raise protocol.DecisionError("普通模式不接受 research；请用 research_mode 启动运行")
+        if self._research_enabled():
+            research = researchmod.ensure(self.state) or {}
+            active = researchmod.pending(self.state)
+            active_by_id = {p["id"]: p for p in active}
+            known_by_id = {p["id"]: p
+                           for p in self.state["research"]["pending_reviews"]}
+            payload = decision.get("research") or {}
+            review_ids = payload.get("review_ids") or []
+            replay = bool(payload) and util.hash_obj(payload) in (
+                research.get("review_fingerprints") or {})
+            replay_review = replay and decision["action"] == "review"
+            execution_actions = {"dispatch", "verify", "repair", "replan"}
+
+            def resolve_observation(item):
+                value = item.get("observation")
+                observations = self.state["research"]["observations"]
+                obs = observations.get(value)
+                if not obs and value:
+                    obs = next((o for o in observations.values()
+                                if o.get("evidence") == value), None)
+                if not obs and "evidence" in item:
+                    obs = observations.get(item["evidence"]) or next(
+                        (o for o in observations.values()
+                         if o.get("evidence") == item["evidence"]), None)
+                return obs
+            if decision["action"] == "review" and not payload:
+                raise protocol.DecisionError("review 必须给出 research")
+            if replay and active and decision["action"] in execution_actions:
+                # The research sub-object is already applied. It may be a
+                # harmless idempotent replay, but it cannot authorize new work
+                # while current pending results remain unreviewed.
+                raise protocol.DecisionError(
+                    "该 research payload 已应用过，不能作为新执行动作的审查许可；"
+                    "请先按当前 pending 结果重新 review，再执行新的派发/修复/重规划")
+            if replay_review:
+                # Exact review replays are idempotent no-ops in
+                # research.apply_review; do not re-judge references against a
+                # state that has moved on.
+                pass
+            elif active and decision["action"] not in (
+                    "request_context", "request_input", "pause"):
+                if not review_ids:
+                    if decision["action"] != "complete":
+                        raise protocol.DecisionError(
+                            "存在待审查研究结果；请用 review 或在 action 的 research.review_ids 中说明")
+                elif not any(rid in active_by_id for rid in review_ids):
+                    if decision["action"] != "complete":
+                        raise protocol.DecisionError(
+                            "research.review_ids 没有覆盖任何当前待审查结果；"
+                            "已解决的 review id 不能代替新事件")
+            if not replay:
+                for rid in review_ids:
+                    if rid not in known_by_id:
+                        raise protocol.DecisionError(f"research.review_id 不存在：{rid}")
+                    review_item = known_by_id[rid]
+                    if review_item.get("status") != "pending":
+                        continue
+                    if review_item.get("kind") in ("key_result", "prediction_mismatch"):
+                        obs_id = review_item.get("observation")
+                        matched = []
+                        for item in payload.get("interpretations") or []:
+                            item_obs = resolve_observation(item)
+                            if not item_obs or item_obs.get("id") != obs_id:
+                                continue
+                            if review_item.get("hypothesis_ids") \
+                                    and item.get("hypothesis") not in review_item["hypothesis_ids"]:
+                                continue
+                            matched.append(item)
+                        if not matched:
+                            raise protocol.DecisionError(
+                                f"待审查结果 {rid} 需要至少一条引用其 observation "
+                                "及相关 hypothesis 的解释")
+                        for item in matched:
+                            h = (self.state.get("hypotheses") or {}).get(
+                                item.get("hypothesis"))
+                            if h and int(item.get("hypothesis_version") or 0) != int(
+                                    h.get("version") or 0):
+                                raise protocol.DecisionError(
+                                    f"待审查结果 {rid} 的解释版本 "
+                                    f"{item.get('hypothesis_version')} 与假设 "
+                                    f"{item.get('hypothesis')} 当前版本 "
+                                    f"{h.get('version')} 不一致")
+                        if not payload.get("direction"):
+                            raise protocol.DecisionError(
+                                f"待审查结果 {rid} 需要给出后续 direction 决定")
+                for item in payload.get("interpretations") or []:
+                    obs = resolve_observation(item)
+                    if not obs:
+                        raise protocol.DecisionError(
+                            f"research observation 不存在：{item.get('observation')}")
+                    h = (self.state.get("hypotheses") or {}).get(
+                        item.get("hypothesis"))
+                    if not h:
+                        raise protocol.DecisionError(
+                            f"research hypothesis 不存在：{item.get('hypothesis')}")
+                    relation = item.get("relation")
+                    if obs.get("status") != "current" and relation != "inconclusive":
+                        raise protocol.DecisionError(
+                            f"observation {obs.get('id')} 已失效，不能再用 {relation} "
+                            "解释；如需收尾请用 inconclusive 或审查 "
+                            "evidence_invalidated 事件")
+                    if int(item.get("hypothesis_version") or 0) != int(
+                            h.get("version") or 0) and relation != "inconclusive":
+                        raise protocol.DecisionError(
+                            f"假设 {h.get('id')} 当前版本是 {h.get('version')}，"
+                            f"解释引用的是 {item.get('hypothesis_version')}")
+                for update in payload.get("hypothesis_updates") or []:
+                    hid = update.get("id")
+                    if hid in self.state["hypotheses"]:
+                        version = self.state["hypotheses"][hid].get("version", 1)
+                        if update.get("version") is not None \
+                                and update["version"] != version:
+                            raise protocol.DecisionError(
+                                f"假设 {hid} 的当前版本是 {version}，"
+                                f"提交版本是 {update['version']}")
         for ev in decision.get("evidence") or []:
             if ev not in self.state["evidence"]:
                 raise protocol.DecisionError(f"决策引用了不存在的证据 ID：{ev}")
@@ -1369,6 +1612,15 @@ class Engine:
                 self._find_artifact(req["artifact"])
             elif "evidence" in req and req["evidence"] not in self.state["evidence"]:
                 raise protocol.DecisionError(f"context_requests 引用了不存在的证据：{req['evidence']}")
+            elif "research_page" in req:
+                if not self._research_enabled():
+                    raise protocol.DecisionError("research_page 只在 research_mode 下可用")
+                try:
+                    if int(req["research_page"]) < 0:
+                        raise ValueError
+                except (TypeError, ValueError):
+                    raise protocol.DecisionError(
+                        "context_requests.research_page 必须是非负整数")
         action = decision["action"]
         if action == "dispatch":
             ids = [t["id"] for t in decision["tasks"]]
@@ -1407,7 +1659,7 @@ class Engine:
             allowed_cancel = {"pending", "blocked", "stale", "budget_blocked", "unverified",
                               "review_unavailable", "review_invalid", "exec_failed",
                               "interrupted", "unknown", "patch_conflict", "unreviewed",
-                              "cancelled"}
+                              "cancelled", "needs_review"}
             for tid in decision.get("cancel") or []:
                 if tid not in tasks:
                     raise protocol.DecisionError(f"cancel 引用了不存在的任务：{tid}")
@@ -1421,14 +1673,42 @@ class Engine:
                 if t["id"] in tasks and tasks[t["id"]].get("status") == "running":
                     raise protocol.DecisionError(f"任务 {t['id']} 正在运行，不能修改定义")
         elif action == "complete":
-            ok, errors = acceptance.validate_completion(self.state, decision, self.store.dir)
-            if not ok:
-                # Not a protocol error: record the rejection and continue planning.
-                decision["_completion_errors"] = errors
+            if self._research_enabled() and decision.get("research"):
+                # Validate against the state after this same decision's research
+                # updates, on a throwaway copy.
+                saved = self.state
+                self.state = copy.deepcopy(saved)
+                try:
+                    self._apply_planner_notes(decision)
+                    self._apply_research_notes(
+                        decision, int(saved.get("round", 0)) + 1)
+                    self._prepare_research_view()
+                    errors = self._completion_gate_errors(decision)
+                finally:
+                    self.state = saved
+            else:
+                errors = self._completion_gate_errors(decision)
+            decision["_completion_errors"] = errors
+
+    def _completion_gate_errors(self, decision: dict) -> list[str]:
+        ok, errors = acceptance.validate_completion(
+            self.state, decision, self.store.dir)
+        errors = list(errors or [])
+        if self._research_enabled():
+            pending = researchmod.pending(self.state)
+            if pending:
+                shown = "、".join(
+                    f"{p['id']}({p.get('kind')})" for p in pending[:8])
+                more = f" 等 {len(pending)} 项" if len(pending) > 8 else ""
+                errors.append(
+                    f"仍有未审查的研究结果：{shown}{more}；请先用 review 处理，"
+                    "complete 不能跳过关键结果审查")
+        return errors
 
     def apply_decision(self, decision: dict, *, external: bool = True) -> dict:
         """Apply a normalized decision, then execute until the next decision point."""
         self.recover()
+        self._prepare_research_view()
         if self.state.get("status") == "cancelled":
             return {"status": "cancelled", "packet": None}
         if self.state.get("recovery"):
@@ -1476,7 +1756,8 @@ class Engine:
             self._build_and_store_packet()
             return {"status": self.state["status"], "packet": self.state.get("pending_packet")}
         # Repeated identical decisions without progress are stopped, not looped.
-        fp = protocol.decision_fingerprint(decision)
+        fp = protocol.decision_fingerprint(
+            decision, ignore_reason=self._research_enabled())
         progress = self._progress_fp()
         prev = self.state.setdefault("progress", {})
         if (prev.get("last_progress_fp") is not None
@@ -1496,26 +1777,54 @@ class Engine:
             self._sync_budget()
             self.commit("no_progress", {}, summary=self.state["stop_reason"])
             return {"status": "paused", "packet": None}
-        self._apply_planner_notes(decision)
         action = decision["action"]
-        self.state["completion_rejection"] = None
-        if action == "dispatch":
-            self._add_tasks(decision["tasks"])
-        elif action == "verify":
-            self._add_tasks(decision["tasks"])
-        elif action == "repair":
-            self._repair_task(decision)
-        elif action == "replan":
-            self._replan(decision)
-        elif action == "complete":
-            errors = decision.get("_completion_errors")
+        research_payload = (decision.get("research") or {}) \
+            if self._research_enabled() else {}
+        # Research judgments and completion are one transaction: a decision
+        # that both updates research and completes must use the final state,
+        # and a rejected decision must not leave either half applied.
+        transactional = bool(research_payload) or action == "complete"
+        original_state = self.state
+        if transactional:
+            self.state = copy.deepcopy(self.state)
+        try:
+            self._apply_planner_notes(decision)
+            if research_payload:
+                self._apply_research_notes(decision, round_no)
+                # Propagate hypothesis version/validity updates to dependent
+                # tasks and pending events before completion is judged.
+                self._prepare_research_view()
+            self.state["completion_rejection"] = None
+            errors = []
+            if action == "complete":
+                # validate_decision just computed this against the final state,
+                # including a research preview; reuse it instead of re-hashing
+                # the same dependency tree.
+                errors = list(decision.get("_completion_errors") or [])
             if errors:
-                self.state["completion_rejection"] = {"at": util.iso(), "errors": errors,
-                                                      "decision_round": round_no}
+                if transactional:
+                    self.state = original_state
+                self.state["completion_rejection"] = {
+                    "at": util.iso(), "errors": errors,
+                    "decision_round": round_no,
+                }
                 self.state["completion"] = None
                 self.state["status"] = "awaiting_decision"
-                self.state["triggers"] = [{"kind": "completion_rejected", "detail": "；".join(errors)}]
-            else:
+                self.state["triggers"] = [{"kind": "completion_rejected",
+                                           "detail": "；".join(errors)}]
+            elif action == "dispatch":
+                self._add_tasks(decision["tasks"])
+            elif action == "verify":
+                self._add_tasks(decision["tasks"])
+            elif action == "repair":
+                self._repair_task(decision)
+            elif action == "replan":
+                self._replan(decision)
+            elif action == "review":
+                self.state["status"] = "awaiting_decision"
+                self.state["triggers"] = [{"kind": "research_reviewed",
+                                           "detail": "研究判断已记录，等待下一步决策"}]
+            elif action == "complete":
                 self.state["completion"] = {
                     "entries": decision["completion"], "validated": True,
                     "at": util.iso(), "summary": decision.get("summary", ""),
@@ -1530,13 +1839,17 @@ class Engine:
                     "evidence": [ev for e in decision["completion"] for ev in e["evidence"]],
                     "verified": True, "at": util.iso(),
                 })
-        elif action == "request_input":
-            self.state["status"] = "needs_input"
-            self.state["question"] = decision["question"]
-            self.state["stop_reason"] = "needs_input"
-        elif action == "pause":
-            self.state["status"] = "paused"
-            self.state["stop_reason"] = decision.get("reason")
+            elif action == "request_input":
+                self.state["status"] = "needs_input"
+                self.state["question"] = decision["question"]
+                self.state["stop_reason"] = "needs_input"
+            elif action == "pause":
+                self.state["status"] = "paused"
+                self.state["stop_reason"] = decision.get("reason")
+        except Exception:
+            if transactional:
+                self.state = original_state
+            raise
         self.state.setdefault("usage_calls", []).extend(usage_sink)
         self._sync_budget()
         self.state["progress"]["last_progress_fp"] = self._progress_fp()
@@ -1544,6 +1857,10 @@ class Engine:
                     summary=f"{round_no}: {action}")
         if self.state["status"] == "awaiting_decision" and action == "complete":
             self._build_and_store_packet()
+        elif action == "review":
+            self._build_and_store_packet()
+            return {"status": self.state.get("status"),
+                    "packet": self.state.get("pending_packet")}
         elif self.state["status"] in ("complete", "paused", "needs_input", "cancelled"):
             return {"status": self.state["status"], "packet": None}
         else:
@@ -1552,6 +1869,17 @@ class Engine:
             self.run_until_decision(recover=False)
         return {"status": self.state.get("status"),
                 "packet": self.state.get("pending_packet")}
+
+    def _apply_research_notes(self, decision: dict, round_no: int = 0) -> None:
+        payload = decision.get("research")
+        if not payload or not self._research_enabled():
+            return
+        try:
+            researchmod.apply_review(
+                self.state, payload,
+                round_no or int(decision.get("round", 0)) or 0)
+        except ValueError as exc:
+            raise protocol.DecisionError(str(exc)) from exc
 
     def _apply_planner_notes(self, decision: dict) -> None:
         for item in decision.get("hypotheses") or []:
@@ -1586,11 +1914,26 @@ class Engine:
             if task["id"] in tasks:
                 raise protocol.DecisionError(f"任务 {task['id']} 已存在")
             tasks[task["id"]] = copy.deepcopy(task)
+        self._resolve_task_hypotheses(tasks)
         limit = int(self.cfg.get("loop", {}).get("max_tasks", 100))
         if len(tasks) > limit:
             raise protocol.DecisionError(f"任务图超过上限 {limit}；请拆分或调整 max_tasks")
         self._resolve_task_deps(tasks)
         self.state["tasks"] = tasks
+
+    def _resolve_task_hypotheses(self, tasks: dict) -> None:
+        known = set((self.state.get("hypotheses") or {}).keys())
+        for task in tasks.values():
+            for field in ("tests_hypotheses", "depends_on_hypotheses"):
+                for hid in task.get(field) or []:
+                    if hid not in known:
+                        raise protocol.DecisionError(
+                            f"任务 {task['id']} 的 {field} 引用了不存在的假设 {hid}")
+            prediction = task.get("research_prediction") or {}
+            hid = prediction.get("hypothesis")
+            if hid and hid not in known:
+                raise protocol.DecisionError(
+                    f"任务 {task['id']} 的 research_prediction 引用了不存在的假设 {hid}")
 
     def _resolve_task_deps(self, tasks: dict) -> None:
         for task in tasks.values():
@@ -1629,6 +1972,9 @@ class Engine:
                     ev["verified"] = False
                     ev["superseded"] = True
                     ev["superseded_reason"] = "主持者修改了验收标准，旧验收失效"
+                    if self._research_enabled():
+                        self._invalidate_research_evidence(
+                            ev["id"], ev["superseded_reason"])
         task["previous"] = {
             "artifact": copy.deepcopy(task.get("artifact")),
             "review": copy.deepcopy(task.get("review")),
@@ -1657,6 +2003,9 @@ class Engine:
                 ev["verified"] = False
                 ev["superseded"] = True
                 ev["superseded_reason"] = f"任务进入 v{old_version + 1} 修复版本，旧验收不再有效"
+                if self._research_enabled():
+                    self._invalidate_research_evidence(
+                        ev["id"], ev["superseded_reason"])
         task["version"] = old_version + 1
         task["prompt"] = (task.get("prompt", "").rstrip()
                           + "\n\n## 修复指示（来自主持者）\n" + decision["instructions"])
@@ -1697,6 +2046,9 @@ class Engine:
                             ev["verified"] = False
                             ev["superseded"] = True
                             ev["superseded_reason"] = "replan 修改了验收标准"
+                            if self._research_enabled():
+                                self._invalidate_research_evidence(
+                                    ev["id"], ev["superseded_reason"])
                     self.state.setdefault("acceptance_history", []).append({
                         "task": tid, "version": old_version,
                         "acceptance": old.get("acceptance") or [],
@@ -1720,6 +2072,7 @@ class Engine:
                 tasks[tid] = copy.deepcopy(new_task)
                 changed_ids.add(tid)
         self._resolve_task_deps(tasks)
+        self._resolve_task_hypotheses(tasks)
         limit = int(self.cfg.get("loop", {}).get("max_tasks", 100))
         if len(tasks) > limit:
             raise protocol.DecisionError(f"任务图超过上限 {limit}；请拆分或调整 max_tasks")
@@ -1729,6 +2082,9 @@ class Engine:
                 ev["verified"] = False
                 ev["superseded"] = True
                 ev["superseded_reason"] = "replan 改变了任务定义或取消了任务"
+                if self._research_enabled():
+                    self._invalidate_research_evidence(
+                        ev["id"], ev["superseded_reason"])
         # Anything that consumed a changed/cancelled task becomes stale.
         for task in self.state["tasks"].values():
             if task.get("status") in ("completed", "unverified", "unreviewed",
@@ -1741,6 +2097,9 @@ class Engine:
                         if ev.get("task") == task["id"]:
                             ev["verified"] = False
                             ev["stale"] = True
+                            if self._research_enabled():
+                                self._invalidate_research_evidence(
+                                    ev["id"], task.get("stale_reason") or "任务失效")
 
     def _find_artifact(self, ref: str) -> tuple[dict, dict, Path]:
         m = re.fullmatch(r"([A-Za-z0-9_-]{1,64})@v(\d+)", ref or "")
@@ -1764,6 +2123,25 @@ class Engine:
         for req in requests:
             offset = int(req.get("offset", 0) or 0)
             limit = min(int(req.get("limit", 6000) or 6000), 20000)
+            if "research_page" in req:
+                page = int(req["research_page"])
+                limit = min(limit, 8000)
+                section = researchmod.packet_section(
+                    self.state, max_chars=limit, offset=page)
+                notes.append({
+                    "request": {"research_page": page, "limit": limit},
+                    "chars": len(util.canonical(section)),
+                    "total_chars": None,
+                    "offset": page,
+                    "limit": limit,
+                    "next_offset": section.get("next_offset"),
+                    "has_more": section.get("next_offset") is not None,
+                    "sha256": None,
+                    "content": section,
+                })
+                existing = [n for n in existing
+                            if "research_page" not in (n.get("request") or {})]
+                continue
             if "artifact" in req:
                 key = req["artifact"]
                 task, art, path = self._find_artifact(key)
@@ -1920,6 +2298,15 @@ class Engine:
             "recovery": self.state.get("recovery"),
             "workspace": self.state.get("workspace"),
             "external_unmetered": (self.state.get("budget") or {}).get("external_unmetered", 0),
+            "research": ({
+                "enabled": True,
+                "pending_reviews": len(researchmod.pending(self.state)),
+                "hypotheses": {
+                    h.get("id"): h.get("status")
+                    for h in (self.state.get("hypotheses") or {}).values()
+                    if not h.get("legacy")
+                },
+            } if self._research_enabled() else {"enabled": False}),
         }
 
     def artifacts_list(self) -> list[dict]:

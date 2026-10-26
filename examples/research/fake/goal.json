@@ -1,0 +1,7 @@
+{
+  "goal": "Record an interpretation of one key observation and a next direction.",
+  "constraints": ["Use only the supplied observation", "Do not claim the hypothesis is proven"],
+  "completion_criteria": [{"id": "g1", "text": "A research direction is recorded for the key result"}],
+  "research": true,
+  "workspace": {"repo": null}
+}

@@ -10,13 +10,16 @@ from .config import TOOL_PRESETS
 from .state import TASK_STATUSES
 
 ACTIONS = {
-    "dispatch", "repair", "verify", "replan", "complete", "request_input", "pause",
-    "request_context",
+    "dispatch", "repair", "verify", "replan", "complete", "review",
+    "request_input", "pause", "request_context",
 }
 POLICIES = {"deterministic", "semantic", "combined", "none"}
 KINDS = {"text", "analysis", "material", "code", "verify"}
 WRITE_TOOLS = {"edit", "bash"}
 CHECK_NAME = re.compile(r"[A-Za-z0-9_.-]{1,48}")
+HYPOTHESIS_ID = re.compile(r"[A-Za-z0-9_.-]{1,64}")
+RESEARCH_RELATIONS = {"supports", "against", "inconclusive", "mixed"}
+RESEARCH_DIRECTIONS = {"continue", "experiment", "narrow", "switch", "pause", "stop"}
 
 
 class DecisionError(ValueError):
@@ -217,6 +220,35 @@ def normalize_task(raw: dict, goal_criteria: list[dict], round_no: int,
                     "replace": negative["replace"],
                     "check": negative.get("check") or checks[0]["name"],
                     "note": str(negative.get("note") or "")}
+    tests_hypotheses = raw.get("tests_hypotheses", raw.get("hypothesis_ids", []))
+    depends_on_hypotheses = raw.get("depends_on_hypotheses", [])
+    for field, value in (("tests_hypotheses", tests_hypotheses),
+                         ("depends_on_hypotheses", depends_on_hypotheses)):
+        _require(isinstance(value, list)
+                 and all(isinstance(x, str) and HYPOTHESIS_ID.fullmatch(x) for x in value),
+                 f"任务 {tid} 的 {field} 必须是假设 id 列表")
+        _require(len(value) == len(set(value)), f"任务 {tid} 的 {field} 不能重复")
+    key_experiment = raw.get("key_experiment", False)
+    _require(isinstance(key_experiment, bool), f"任务 {tid} 的 key_experiment 必须是布尔值")
+    experiment_group = raw.get("experiment_group")
+    if experiment_group is not None:
+        _require(isinstance(experiment_group, str) and experiment_group.strip(),
+                 f"任务 {tid} 的 experiment_group 必须是非空字符串")
+        experiment_group = experiment_group.strip()
+    prediction = raw.get("research_prediction")
+    if prediction is not None:
+        _require(isinstance(prediction, dict), f"任务 {tid} 的 research_prediction 必须是对象")
+        _require(isinstance(prediction.get("hypothesis"), str)
+                 and HYPOTHESIS_ID.fullmatch(prediction["hypothesis"]),
+                 f"任务 {tid} 的 research_prediction.hypothesis 不合法")
+        _require(isinstance(prediction.get("check"), str)
+                 and prediction["check"] in {c["name"] for c in checks},
+                 f"任务 {tid} 的 research_prediction.check 不存在")
+        expect = prediction.get("expect_exit", 0)
+        _require(type(expect) is int, f"任务 {tid} 的 research_prediction.expect_exit 必须是整数")
+        prediction = {"hypothesis": prediction["hypothesis"],
+                      "check": prediction["check"], "expect_exit": expect,
+                      "note": str(prediction.get("note") or "")}
     task = {
         "id": tid, "version": 1, "kind": kind, "prompt": prompt.strip(),
         "question": raw["question"].strip(), "produces": raw["produces"].strip(),
@@ -227,6 +259,11 @@ def normalize_task(raw: dict, goal_criteria: list[dict], round_no: int,
         "max_output_tokens": max_out, "timeout": timeout, "side_effects": side_effects,
         "input_files": input_files, "verify_of": verify_of,
         "cwd": cwd_value, "model": model_override,
+        "tests_hypotheses": tests_hypotheses,
+        "depends_on_hypotheses": depends_on_hypotheses,
+        "key_experiment": key_experiment,
+        "experiment_group": experiment_group,
+        "research_prediction": prediction,
         "created_round": round_no, "status": "pending", "attempts": 0, "repairs": 0,
         "result_version": 0, "artifact": None, "dep_versions": {},
         "last_error": None, "error_signature": None, "repeat_count": 0,
@@ -237,11 +274,19 @@ def normalize_task(raw: dict, goal_criteria: list[dict], round_no: int,
 
 
 def definition_hash(task: dict) -> str:
-    keys = ("id", "kind", "prompt", "question", "produces", "decision_impact", "tools",
-            "acceptance", "acceptance_policy", "checks", "negative_check", "allowed_paths",
-            "depends_on", "satisfies", "max_chars", "max_output_tokens", "timeout",
-            "side_effects", "input_files", "verify_of", "cwd", "model")
-    return util.hash_obj({k: task.get(k) for k in keys})
+    base_keys = ("id", "kind", "prompt", "question", "produces", "decision_impact", "tools",
+                 "acceptance", "acceptance_policy", "checks", "negative_check", "allowed_paths",
+                 "depends_on", "satisfies", "max_chars", "max_output_tokens", "timeout",
+                 "side_effects", "input_files", "verify_of", "cwd", "model")
+    data = {k: task.get(k) for k in base_keys}
+    # Keep old task hashes stable. Research fields participate only when set:
+    # an old task has no empty list/False placeholders to compare against.
+    for key in ("tests_hypotheses", "depends_on_hypotheses", "key_experiment",
+                "experiment_group", "research_prediction"):
+        value = task.get(key)
+        if value not in (None, False, [], ""):
+            data[key] = value
+    return util.hash_obj(data)
 
 
 def resolve_dep_patterns(tasks: dict[str, dict], patterns: list[str], self_id: str) -> list[str]:
@@ -292,6 +337,105 @@ def validate_graph(tasks: dict[str, dict], goal_criteria: list[dict]) -> None:
         visit(node, [])
 
 
+def normalize_research(raw, *, allow_empty: bool = False) -> dict | None:
+    if raw is None:
+        return None
+    _require(isinstance(raw, dict), "research 必须是对象")
+    review_ids = raw.get("review_ids") or []
+    _require(isinstance(review_ids, list) and all(isinstance(x, str) and x for x in review_ids),
+             "research.review_ids 必须是字符串列表")
+    interpretations = raw.get("interpretations") or []
+    _require(isinstance(interpretations, list) and len(interpretations) <= 24,
+             "research.interpretations 必须是最多 24 项的列表")
+    normalized_interps = []
+    for item in interpretations:
+        _require(isinstance(item, dict), "research.interpretations 的每一项必须是对象")
+        observation = item.get("observation") or item.get("evidence")
+        _require(isinstance(observation, str) and observation,
+                 "interpretation 必须给出 observation 或 evidence")
+        hid = item.get("hypothesis")
+        _require(isinstance(hid, str) and HYPOTHESIS_ID.fullmatch(hid),
+                 "interpretation.hypothesis 不合法")
+        version = item.get("hypothesis_version")
+        _require(type(version) is int and version > 0,
+                 "interpretation.hypothesis_version 必须是正整数")
+        relation = item.get("relation")
+        _require(relation in RESEARCH_RELATIONS,
+                 f"interpretation.relation 必须是 {sorted(RESEARCH_RELATIONS)} 之一")
+        supersedes = item.get("supersedes") or []
+        _require(isinstance(supersedes, list)
+                 and all(isinstance(x, str) and x for x in supersedes),
+                 "interpretation.supersedes 必须是字符串列表")
+        normalized_interps.append({
+            "observation": observation, "hypothesis": hid,
+            "hypothesis_version": version, "relation": relation,
+            "conditions": str(item.get("conditions") or ""),
+            "rationale": str(item.get("rationale") or ""),
+            "source": str(item.get("source") or "planner"),
+            "supersedes": supersedes,
+        })
+    updates = raw.get("hypothesis_updates") or []
+    _require(isinstance(updates, list) and len(updates) <= 24,
+             "research.hypothesis_updates 必须是最多 24 项的列表")
+    normalized_updates = []
+    for item in updates:
+        _require(isinstance(item, dict), "hypothesis_updates 的每一项必须是对象")
+        hid = item.get("id")
+        _require(isinstance(hid, str) and HYPOTHESIS_ID.fullmatch(hid),
+                 "hypothesis_updates.id 不合法")
+        text = item.get("text")
+        _require(isinstance(text, str) and text.strip(), f"假设 {hid} 缺少 text")
+        update = {"id": hid, "text": text.strip()}
+        for field in ("scope", "core", "alternatives", "version", "status"):
+            if field in item:
+                update[field] = item[field]
+        _require(update.get("scope") is None or isinstance(update["scope"], str),
+                 f"假设 {hid} 的 scope 必须是字符串")
+        _require(update.get("core") is None or isinstance(update["core"], bool),
+                 f"假设 {hid} 的 core 必须是布尔值")
+        _require(update.get("status") is None
+                 or update["status"] in {"open", "supported", "contested",
+                                         "contradicted", "inconclusive", "superseded"},
+                 f"假设 {hid} 的 status 不合法")
+        _require(update.get("alternatives") is None
+                 or (isinstance(update["alternatives"], list)
+                     and all(isinstance(x, str) for x in update["alternatives"])),
+                 f"假设 {hid} 的 alternatives 必须是字符串列表")
+        if update.get("version") is not None:
+            _require(type(update["version"]) is int and update["version"] > 0,
+                     f"假设 {hid} 的 version 必须是正整数")
+        normalized_updates.append(update)
+    direction = raw.get("direction")
+    if direction is not None:
+        _require(isinstance(direction, dict), "research.direction 必须是对象")
+        choice = direction.get("choice")
+        _require(choice in RESEARCH_DIRECTIONS,
+                 f"research.direction.choice 必须是 {sorted(RESEARCH_DIRECTIONS)} 之一")
+        hid = direction.get("hypothesis")
+        _require(hid is None or (isinstance(hid, str) and HYPOTHESIS_ID.fullmatch(hid)),
+                 "research.direction.hypothesis 不合法")
+        alternatives = direction.get("alternatives") or []
+        _require(isinstance(alternatives, list)
+                 and all(isinstance(x, str) and HYPOTHESIS_ID.fullmatch(x) for x in alternatives),
+                 "research.direction.alternatives 必须是假设 id 列表")
+        evidence = direction.get("evidence") or []
+        _require(isinstance(evidence, list) and all(isinstance(x, str) for x in evidence),
+                 "research.direction.evidence 必须是字符串列表")
+        reason = direction.get("reason")
+        _require(isinstance(reason, str) and reason.strip(),
+                 "research.direction 必须给出非空 reason")
+        direction = {"choice": choice, "hypothesis": hid,
+                     "alternatives": alternatives, "evidence": evidence,
+                     "reason": reason.strip()}
+    result = {"review_ids": review_ids, "interpretations": normalized_interps,
+              "hypothesis_updates": normalized_updates, "direction": direction}
+    if allow_empty and not any(result.values()):
+        return result
+    _require(bool(review_ids or normalized_interps or normalized_updates or direction),
+             "research 至少要包含 review_ids、interpretations、hypothesis_updates 或 direction")
+    return result
+
+
 def normalize_decision(raw: dict, goal_criteria: list[dict], round_no: int,
                        known_task_ids: set[str]) -> dict:
     _require(isinstance(raw, dict), "决策必须是 JSON 对象")
@@ -320,8 +464,12 @@ def normalize_decision(raw: dict, goal_criteria: list[dict], round_no: int,
     _require(isinstance(requests, list) and len(requests) <= 4, "context_requests 最多 4 项")
     for item in requests:
         _require(isinstance(item, dict) and (isinstance(item.get("artifact"), str)
-                                             or isinstance(item.get("evidence"), str)),
-                 "context_requests 的每一项必须是 {artifact} 或 {evidence}")
+                                             or isinstance(item.get("evidence"), str)
+                                             or type(item.get("research_page")) is int),
+                 "context_requests 的每一项必须是 {artifact}、{evidence} 或 {research_page}")
+        if "research_page" in item:
+            _require(type(item["research_page"]) is int and item["research_page"] >= 0,
+                     "context_requests.research_page 必须是非负整数")
         if "offset" in item:
             _require(type(item["offset"]) is int and item["offset"] >= 0,
                      "context_requests.offset 必须是非负整数")
@@ -337,13 +485,18 @@ def normalize_decision(raw: dict, goal_criteria: list[dict], round_no: int,
         "context_requests": requests, "next_acceptance": next_acceptance,
         "round": round_no, "raw_action": action,
     }
+    if raw.get("research") is not None:
+        decision["research"] = normalize_research(raw["research"])
     tasks = raw.get("tasks") or []
     _require(isinstance(tasks, list), "tasks 必须是列表")
+    if action == "review":
+        _require(decision.get("research") is not None, "review 必须给出 research")
+        _require(not tasks, "review 只更新研究判断，不能携带 tasks；需要执行请用 dispatch/verify/replan")
     if action == "dispatch":
         _require(bool(tasks), "dispatch 至少要派发一个任务")
         decision["tasks"] = [normalize_task(t, goal_criteria, round_no) for t in tasks]
     elif action == "request_context":
-        _require(bool(requests), "request_context 至少要请求一个 artifact 或 evidence")
+        _require(bool(requests), "request_context 至少要请求一个 artifact、evidence 或 research_page")
     elif action == "verify":
         target = raw.get("target_task")
         _require(isinstance(target, str) and target, "verify 必须给出 target_task")
@@ -418,7 +571,46 @@ def normalize_decision(raw: dict, goal_criteria: list[dict], round_no: int,
     return decision
 
 
-def decision_fingerprint(decision: dict) -> str:
+def _research_decision_shape(payload) -> dict | None:
+    if not isinstance(payload, dict):
+        return payload
+    interps = []
+    for item in payload.get("interpretations") or []:
+        if not isinstance(item, dict):
+            interps.append(item)
+            continue
+        interps.append({
+            "observation": item.get("observation"),
+            "hypothesis": item.get("hypothesis"),
+            "hypothesis_version": item.get("hypothesis_version"),
+            "relation": item.get("relation"),
+            "conditions": item.get("conditions") or "",
+            "supersedes": sorted(item.get("supersedes") or []),
+        })
+    interps.sort(key=util.canonical)
+    updates = []
+    for item in payload.get("hypothesis_updates") or []:
+        if not isinstance(item, dict):
+            updates.append(item)
+            continue
+        updates.append({k: item.get(k) for k in
+                        ("id", "text", "scope", "core", "alternatives",
+                         "version", "status")})
+    updates.sort(key=util.canonical)
+    direction = payload.get("direction")
+    if isinstance(direction, dict):
+        direction = {
+            "choice": direction.get("choice"),
+            "hypothesis": direction.get("hypothesis"),
+            "alternatives": sorted(direction.get("alternatives") or []),
+            "evidence": sorted(direction.get("evidence") or []),
+        }
+    return {"review_ids": sorted(payload.get("review_ids") or []),
+            "interpretations": interps, "hypothesis_updates": updates,
+            "direction": direction}
+
+
+def decision_fingerprint(decision: dict, *, ignore_reason: bool = False) -> str:
     relevant = {
         "action": decision.get("action"),
         "target": decision.get("target_task"),
@@ -429,6 +621,10 @@ def decision_fingerprint(decision: dict) -> str:
         "cancel": decision.get("cancel"),
         "completion": decision.get("completion"),
         "question": decision.get("question"),
-        "reason": decision.get("reason"),
+        "research": decision.get("research"),
     }
+    if ignore_reason:
+        relevant["research"] = _research_decision_shape(decision.get("research"))
+    else:
+        relevant["reason"] = decision.get("reason")
     return util.hash_obj(relevant)
