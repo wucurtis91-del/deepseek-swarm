@@ -6,7 +6,9 @@ import copy
 import json
 import os
 import re
+import inspect
 import signal
+import sys
 import threading
 import time
 import traceback
@@ -14,7 +16,11 @@ from pathlib import Path
 
 from . import acceptance, artifacts, budget as budgetmod, config as cfgmod
 from . import packet as packetmod, prompts, protocol, research as researchmod
-from . import security, state as statemod, util
+from . import live, security, state as statemod, util
+
+# How a call's purpose is shown in live progress.
+LIVE_PHASES = {"call": "执行", "retry": "重试执行", "worker": "执行", "review": "复核", "reviewer": "复核", "compress": "压缩",
+               "critic": "评审", "planner": "规划", "planner_retry": "规划"}
 
 
 def count_chars(text: str) -> int:
@@ -69,6 +75,22 @@ class Engine:
         self.budget: budgetmod.Budget | None = None
         self.workspace: artifacts.Workspace | None = None
         self._committed_state: dict | None = None
+        # Live progress in <run>/live/: written only once a model call starts.
+        self.live = live.LiveBoard(
+            store.dir, price=self._live_price,
+            echo=lambda line: print(line, file=sys.stderr, flush=True),
+            echo_every=float((cfg.get("loop") or {}).get("progress_every", 15)))
+
+    def _live_price(self, usage: dict, model: str):
+        return cfgmod.estimate_cost(usage, model, util.now(),
+                                    self.cfg.get("prices", cfgmod.PRICES)).get("usd")
+
+    def finish_live(self) -> None:
+        """Close live progress when a command ends, with each task's current status."""
+        tasks = (self.state or {}).get("tasks") or {}
+        for tid in list(self.live.tasks):
+            self.live.task_done(tid, (tasks.get(tid) or {}).get("status") or "done")
+        self.live.finish()
 
     # ------------------------------------------------------------ setup
     def start(self, goal: dict, workspace_values: dict | None = None) -> dict:
@@ -372,7 +394,7 @@ class Engine:
     def _call_model(self, role_name: str, prompt: str, *, cwd, tools=None,
                     max_turns=None, timeout=None, add_dirs=(), purpose="call",
                     model=None, task=None, max_output_tokens=None,
-                    usage_sink: list | None = None) -> dict:
+                    usage_sink: list | None = None, live_task: str | None = None) -> dict:
         role = self.roles[role_name]
         model = model or (task or {}).get("model") or role.model
         if model != role.model:
@@ -416,18 +438,28 @@ class Engine:
                     "model_observed": [], "provider": role.provider,
                     "endpoint": role.endpoint}
         usage_record = None
+        res = None
+        # live_task labels a call that belongs to a task but must not take its
+        # settings (a reviewer keeps its own model).
+        tracker = self.live.begin(live_task or (task or {}).get("id") or purpose,
+                                  LIVE_PHASES.get(purpose, purpose), model,
+                                  (task or {}).get("version"))
         try:
             backend = self.backends[role_name]
+            extra = ({"on_line": tracker.on_line}
+                     if "on_line" in inspect.signature(backend.call).parameters else {})
             res = backend.call(prompt, cwd=cwd, tools=tools, max_turns=max_turns,
                                timeout=timeout, add_dirs=add_dirs,
                                cancel_event=self.cancel_event, purpose=purpose,
-                               model=model, max_output_tokens=est_out)
+                               model=model, max_output_tokens=est_out, **extra)
         except Exception as exc:  # a backend bug must not kill the batch
             res = {"ok": False, "text": "", "usage": {}, "usage_missing": True,
                    "error": f"{type(exc).__name__}: {exc}", "error_kind": "unknown",
                    "seconds": 0.0, "role": role_name, "model_requested": model,
                    "identity": "unknown", "model_observed": [],
                    "provider": role.provider, "endpoint": role.endpoint}
+        finally:
+            tracker.close(res)
         if res.get("identity") == "mismatch":
             res["ok"] = False
             res["error"] = ("模型身份不一致：请求 " + model + "，响应报告 "
@@ -965,7 +997,7 @@ class Engine:
                         "reviewer", review_prompt, cwd=Path(ctx["cwd"]),
                         tools=self.roles["reviewer"].tools,
                         add_dirs=[str(self.store.dir), str(self.store.dir / "artifacts")],
-                        purpose=purpose, usage_sink=usage)
+                        purpose=purpose, usage_sink=usage, live_task=task["id"])
                 review = acceptance.semantic_review(
                     task, body, checks, changes, self.cfg.get("loop", {}), call_reviewer,
                     self.cancel_event)

@@ -10,7 +10,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import config, procs, security, util
+from . import config, live, procs, security, util
 
 
 class BackendError(RuntimeError):
@@ -154,7 +154,7 @@ class ClaudeBackend:
         tool_list, mode = config.TOOL_PRESETS[tools]
         cmd = [
             self.claude, "-p",
-            "--output-format", "json",
+            *live.STREAM_FLAGS,
             "--model", effective_model,
             "--max-turns", str(max_turns),
             "--tools", ",".join(tool_list),
@@ -180,7 +180,8 @@ class ClaudeBackend:
              max_turns: int | None = None, timeout: int | None = None,
              add_dirs=(), cancel_event=None, purpose: str = "",
              model: str | None = None,
-             max_output_tokens: int | None = None) -> dict:
+             max_output_tokens: int | None = None, on_line=None) -> dict:
+        """One call. Output is streamed; `on_line` gets each stream-json line (live progress)."""
         role = self.role
         effective_model = model or role.model
         tools = tools or role.tools
@@ -199,7 +200,8 @@ class ClaudeBackend:
             "usage_missing": True,
         }
         proc = procs.run(cmd, shell=False, cwd=cwd, env=self._env(max_output_tokens),
-                         input_text=prompt, timeout=timeout, cancel_event=cancel_event)
+                         input_text=prompt, timeout=timeout, cancel_event=cancel_event,
+                         on_stdout_line=on_line)
         base["seconds"] = proc["seconds"]
         base["exit_code"] = proc.get("code")
         base["cancelled"] = bool(proc.get("cancelled"))
@@ -214,10 +216,9 @@ class ClaudeBackend:
                         error_kind="config")
             return base
         stdout = proc.get("stdout", "")
-        try:
-            data = json.loads(stdout)
-        except ValueError:
-            err = security.redact((proc.get("output") or stdout or "").strip())[-800:]
+        data = live.final_result(stdout)
+        if data is None:
+            err = security.redact((proc.get("stderr") or stdout or "").strip())[-800:]
             base.update(ok=False, error=err or f"退出码 {proc.get('code')}",
                         error_kind=classify_error(err))
             return base
@@ -281,8 +282,19 @@ class FakeBackend:
              max_turns: int | None = None, timeout: int | None = None,
              add_dirs=(), cancel_event=None, purpose: str = "",
              model: str | None = None,
-             max_output_tokens: int | None = None) -> dict:
+             max_output_tokens: int | None = None, on_line=None) -> dict:
         effective_model = model or self.role.model
+        res = self._call(prompt, cwd=cwd, tools=tools, purpose=purpose,
+                         effective_model=effective_model, max_output_tokens=max_output_tokens)
+        if on_line is not None:
+            for line in _fake_stream(res):
+                try:
+                    on_line(line)
+                except Exception:
+                    pass
+        return res
+
+    def _call(self, prompt, *, cwd, tools, purpose, effective_model, max_output_tokens) -> dict:
         with self._lock:
             self.calls.append({"prompt": prompt, "cwd": str(cwd), "tools": tools or self.role.tools,
                                "model": effective_model, "role": self.role.name,
@@ -326,6 +338,26 @@ class FakeBackend:
             base["ok"] = False
             base["error_kind"] = "cancelled"
         return base
+
+
+def _fake_stream(res: dict):
+    """The stream-json lines a real call with this result would roughly have produced."""
+    usage = res.get("usage") if isinstance(res.get("usage"), dict) else {}
+    start = {k: usage.get(k, 0) for k in ("input_tokens", "cache_read_input_tokens",
+                                           "cache_creation_input_tokens")}
+
+    def ev(event):
+        return json.dumps({"type": "stream_event", "event": event}, ensure_ascii=False)
+
+    yield ev({"type": "message_start", "message": {"usage": {**start, "output_tokens": 0}}})
+    yield ev({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}})
+    if res.get("text"):
+        yield ev({"type": "content_block_delta", "index": 0,
+                  "delta": {"type": "text_delta", "text": str(res["text"])}})
+    yield ev({"type": "content_block_stop", "index": 0})
+    yield ev({"type": "message_delta", "usage": dict(usage)})
+    yield json.dumps({"type": "result", "is_error": not res.get("ok"), "usage": dict(usage),
+                      "result": res.get("text", "")}, ensure_ascii=False)
 
 
 def build_backends(roles: dict[str, config.Role], *, allow_fake: bool = False,

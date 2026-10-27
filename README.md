@@ -41,6 +41,22 @@ The planner decides direction; the controller owns state, scheduling, budgets, d
 retries, persistence, cancellation and the record of what actually happened. The loop stops only
 when every goal criterion has current, verified evidence accepted by the controller.
 
+## Live progress
+
+Every run writes `live/index.html` (in the results folder, or the loop's run folder): a page that refreshes
+every 2 seconds and shows, per task, whether the worker is thinking, reading a file or writing, how much it
+has thought so far and the latest of it, elapsed time, and cost so far (the part still streaming is an
+estimate and is marked as one). `live/status.json` holds the same data.
+
+```bash
+python3 scripts/swarm.py watch RESULTS --serve --open   # pop up the page (http on 127.0.0.1)
+python3 scripts/swarm.py watch RESULTS                  # the same, in the terminal
+python3 scripts/swarm.py watch RESULTS --once --thinking  # one snapshot, for an agent to relay
+```
+
+Workers run the Claude CLI with `--output-format stream-json`, so thinking, tool calls and per-message
+usage arrive while the call is still running. `scripts/swarm_loop.py watch RUN_DIR` takes the same options.
+
 ## What the controller provides
 
 - **Isolated execution.** Workers run in Claude Code's `--bare`/`--safe-mode` mode with a minimal

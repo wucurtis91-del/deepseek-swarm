@@ -28,6 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from swarmlib import backends as backends_mod       # noqa: E402
 from swarmlib import config as config_mod           # noqa: E402
 from swarmlib import engine as engine_mod           # noqa: E402
+from swarmlib import live as live_mod               # noqa: E402
 from swarmlib import protocol                       # noqa: E402
 from swarmlib import state as state_mod             # noqa: E402
 from swarmlib import util                           # noqa: E402
@@ -217,6 +218,7 @@ def cmd_decide(args) -> int:
         raise SystemExit(f"运行目录不存在或没有状态：{store.dir}")
     cancel_event = threading.Event()
     old = _install_signals(cancel_event)
+    engine = None
     try:
         with store.lock():
             engine = engine_mod.Engine(store, cfg, roles, _backends(roles, args, script),
@@ -252,6 +254,8 @@ def cmd_decide(args) -> int:
             _print_status(summary, args.json)
             return 0
     finally:
+        if engine is not None:
+            engine.finish_live()   # final live/status.json for `watch`
         _restore_signals(old)
 
 
@@ -264,6 +268,7 @@ def cmd_auto(args) -> int:
         raise SystemExit(f"运行目录不存在或没有状态：{store.dir}")
     cancel_event = threading.Event()
     old = _install_signals(cancel_event)
+    engine = None
     try:
         with store.lock():
             engine = engine_mod.Engine(store, cfg, roles, _backends(roles, args, script),
@@ -276,6 +281,8 @@ def cmd_auto(args) -> int:
             _print_status(summary, args.json)
             return 0 if summary.get("status") == "complete" else 1
     finally:
+        if engine is not None:
+            engine.finish_live()   # final live/status.json for `watch`
         _restore_signals(old)
 
 
@@ -288,6 +295,7 @@ def cmd_resume(args) -> int:
         raise SystemExit(f"运行目录不存在或没有状态：{store.dir}")
     cancel_event = threading.Event()
     old = _install_signals(cancel_event)
+    engine = None
     try:
         with store.lock():
             engine = engine_mod.Engine(store, cfg, roles, _backends(roles, args, script),
@@ -305,6 +313,8 @@ def cmd_resume(args) -> int:
             _print_status(summary, args.json)
             return 0 if summary.get("status") == "complete" else 1
     finally:
+        if engine is not None:
+            engine.finish_live()   # final live/status.json for `watch`
         _restore_signals(old)
 
 
@@ -408,6 +418,12 @@ def cmd_validate(args) -> int:
     return 0
 
 
+def cmd_watch(args) -> int:
+    if args.serve:
+        return live_mod.serve(args.run_dir, port=args.port, open_window=args.open)
+    return live_mod.watch(args.run_dir, once=args.once, interval=args.interval, thinking=args.thinking)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description="Persistent loop: Claude planner, DeepSeek workers, controller-owned "
@@ -506,6 +522,20 @@ def main() -> int:
     v.add_argument("--config")
     v.add_argument("--allow-fake-backend", action="store_true")
     v.set_defaults(func=cmd_validate)
+
+    w = sub.add_parser("watch", help="live progress of the calls running for this run: "
+                                     "thinking, current step, cost so far")
+    w.add_argument("run_dir")
+    w.add_argument("--once", action="store_true",
+                   help="print one snapshot and exit (for an agent to relay)")
+    w.add_argument("--thinking", action="store_true",
+                   help="also show the last thing each running worker thought or wrote")
+    w.add_argument("--interval", type=float, default=2.0, help="refresh interval in seconds")
+    w.add_argument("--serve", action="store_true",
+                   help="serve the live page on 127.0.0.1 (for browser panes that cannot open local files)")
+    w.add_argument("--port", type=int, default=8765, help="port for --serve (default: 8765)")
+    w.add_argument("--open", action="store_true", help="with --serve: open the page in a browser window")
+    w.set_defaults(func=cmd_watch)
 
     args = ap.parse_args()
     return args.func(args)

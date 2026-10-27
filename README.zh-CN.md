@@ -32,6 +32,17 @@ flowchart LR
 
 任务很小时，直接在当前会话完成通常更合适。这个项目主要解决的是：大量执行工作可以拆出去，但方向判断、结果衔接和最终验收仍需要持续管理。
 
+## 实时进度
+
+每次运行都会在结果目录（持续工作流是运行目录）里写 `live/index.html`：每 2 秒自动刷新，显示每个任务正在思考、
+读文件还是写答案，已经想了多少字、最近在想什么，用时多少，到现在大约花了多少钱（进行中的部分是估算，会标出来）。
+
+```bash
+python3 scripts/swarm.py watch 结果目录 --serve --open     # 弹出网页窗口（本机 127.0.0.1）
+python3 scripts/swarm.py watch 结果目录                    # 在终端里看
+python3 scripts/swarm.py watch 结果目录 --once --thinking  # 打印一次，给 Claude/Codex 转述
+```
+
 ## 选择工作流
 
 | 入口 | 适用情况 | 主要命令 |

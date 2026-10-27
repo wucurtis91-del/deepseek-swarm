@@ -57,6 +57,7 @@ description: Offload token-heavy work to several DeepSeek workers running in par
 5. **预检再运行**：用了 `inputs` 或 `depends_on` 时，先运行 `python3 -I SWARM plan tasks.json`，
    确认展开后的 id、分层顺序和检查命令都对，这一步不调用 DeepSeek；加 `--show <id>` 可以看某个任务
    完整的执行者 prompt。然后运行 `python3 -I SWARM run tasks.json`。预计超过 2 分钟的话放到后台运行。
+   **开跑后立刻把实时进度给用户看**，见下面「实时进度」一节。
 6. **核对**，按这个顺序：
    - 先看 `summary.json`，状态有这几种：
      - `passed`：通过了复核或检查命令，而且不是 stale。`verified_by` 写明是哪一种（`review`、
@@ -74,6 +75,24 @@ description: Offload token-heavy work to several DeepSeek workers running in par
    - 通读结果，找复核员容易漏掉的问题：标签和描述错误、前后矛盾、凭空出现的「如图」。
    - 不合格的，改了 prompt 或验收标准后用 `--only id1,id2` 重跑。
 7. **汇总**：合并成最终结果交给用户，附上关键依据、验证结果，以及仍待确认的内容。
+
+## 实时进度
+
+DeepSeek 思考时用户看不到进度，等待会让人焦虑。每次运行都会实时写进度：结果目录（持续工作流是运行目录）
+下的 `live/index.html` 是一个每 2 秒自动刷新的页面，显示每个任务在思考、读文件还是写答案，已经想了多少字、
+最近在想什么，用时多少，以及到现在为止大约花了多少钱。还在进行中的那部分费用是估算的，会明确标出来。
+`live/status.json` 是同样内容的数据。
+
+开跑后马上做一件事，让用户看到这个页面：
+- **Claude Code 桌面版**：后台运行 `python3 -I SWARM watch <结果目录> --serve`，在内置浏览器里打开它打印的
+  `http://127.0.0.1:8765/index.html`。内置浏览器打不开本地文件，所以要先 `--serve`。
+- **Codex、终端或其他环境**：后台运行 `python3 -I SWARM watch <结果目录> --serve --open`，会用默认浏览器弹出
+  一个窗口；或者直接 `open <结果目录>/live/index.html`。
+- **只能看文字时**：运行 `python3 -I SWARM watch <结果目录> --once`（加 `--thinking` 会附上最近在想的内容），
+  把结果压成一两句告诉用户。等待期间每隔一两分钟这样报一次就够了，不要每几秒轮询。
+
+另外，运行过程中 stderr 每 15 秒会打一行进度（`--progress-every` 可调，0 关闭）。持续工作流用
+`python3 -I LOOP watch <运行目录>`，参数相同。
 
 ## 任务文件
 

@@ -94,8 +94,13 @@ def _reap_descendants(proc: subprocess.Popen) -> None:
 
 def run(argv, *, shell: bool = False, cwd=None, env=None, input_text: str | None = None,
         timeout: float | None = None, cancel_event: threading.Event | None = None,
-        merge_output: bool = False) -> dict:
-    """Run a command, returning a record. Never raises for ordinary failures."""
+        merge_output: bool = False, on_stdout_line=None) -> dict:
+    """Run a command, returning a record. Never raises for ordinary failures.
+
+    With `on_stdout_line`, stdout is read line by line as it arrives and each line
+    is passed to the callback (live progress); the record still holds all of it.
+    An exception in the callback is swallowed: progress display must never break a run.
+    """
     start = time.time()
     cwd_path = Path(cwd).expanduser().resolve() if cwd else None
     if cwd_path is not None and not cwd_path.is_dir():
@@ -127,7 +132,50 @@ def run(argv, *, shell: bool = False, cwd=None, env=None, input_text: str | None
             box.setdefault("stderr", "")
             box["read_error"] = str(exc)
 
-    reader = threading.Thread(target=collect, daemon=True)
+    def collect_lines() -> None:
+        lines: list[str] = []
+        err_parts: list[str] = []
+
+        def feed() -> None:
+            try:
+                if input_text is not None:
+                    proc.stdin.write(input_text)
+                proc.stdin.close()
+            except (ValueError, OSError):
+                pass
+
+        def drain_err() -> None:
+            try:
+                err_parts.append(proc.stderr.read() or "")
+            except (ValueError, OSError):
+                pass
+
+        helpers = []
+        if input_text is not None:
+            helpers.append(threading.Thread(target=feed, daemon=True))
+        if not merge_output:
+            helpers.append(threading.Thread(target=drain_err, daemon=True))
+        for h in helpers:
+            h.start()
+        try:
+            for line in proc.stdout:
+                lines.append(line)
+                try:
+                    on_stdout_line(line)
+                except Exception:
+                    pass
+        except (ValueError, OSError) as exc:
+            box["read_error"] = str(exc)
+        for h in helpers:
+            h.join(5.0)
+        proc.wait()
+        for pipe in (proc.stdout, proc.stderr):
+            if pipe is not None:
+                pipe.close()
+        box["stdout"] = "".join(lines)
+        box["stderr"] = "".join(err_parts)
+
+    reader = threading.Thread(target=collect_lines if on_stdout_line else collect, daemon=True)
     reader.start()
     deadline = start + timeout if timeout else None
     timed_out = cancelled = False

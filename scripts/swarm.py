@@ -28,6 +28,7 @@ from ~1k tokens of overhead instead of tens of thousands.
 Usage:
   swarm.py check                         verify the DeepSeek key with one tiny call
   swarm.py plan TASKS.json [--show ID]   show expanded tasks and their order, no API calls
+  swarm.py watch RESULTS [--once]        live progress of a running batch (also live/index.html)
   swarm.py run TASKS.json [options]      run all tasks in parallel
   swarm.py run TASKS.json --only a,b     rerun selected tasks
 
@@ -40,6 +41,7 @@ import concurrent.futures as cf
 import datetime as dt
 import fnmatch
 import glob
+import inspect
 import json
 import os
 import re
@@ -57,6 +59,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from swarmlib import config as _config          # noqa: E402
+from swarmlib import live as _live              # noqa: E402
 from swarmlib import procs as _procs            # noqa: E402
 from swarmlib import security as _security      # noqa: E402
 from swarmlib import util as _util              # noqa: E402
@@ -246,8 +249,10 @@ class Runner:
         self.env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = str(
             getattr(args, "max_output_tokens", DEFAULT_MAX_OUTPUT_TOKENS))
 
-    def call(self, prompt: str, task: dict, tools: str, model: str) -> dict:
-        """One headless call. Returns {ok, text, usage, turns, seconds, error}."""
+    def call(self, prompt: str, task: dict, tools: str, model: str, tracker=None) -> dict:
+        """One headless call. Returns {ok, text, usage, turns, seconds, error}.
+
+        Output is streamed (stream-json); `tracker` receives each line for live progress."""
         a = self.args
         tool_list, mode = TOOL_PRESETS[tools]
         cmd = [
@@ -255,7 +260,7 @@ class Runner:
             "--setting-sources", "",
             "--strict-mcp-config",
             "--model", model,
-            "--output-format", "json",
+            *_live.STREAM_FLAGS,
             "--max-turns", str(task.get("max_turns", a.max_turns)),
             "--tools", ",".join(tool_list),
         ]
@@ -270,17 +275,17 @@ class Runner:
             return {"ok": False, "error": f"工作目录不存在：{cwd}", "seconds": 0.0,
                     "usage": {}, "usage_missing": True}
         proc = _procs.run(cmd, shell=False, cwd=cwd, env=self.env, input_text=prompt,
-                          timeout=task.get("timeout", a.timeout))
+                          timeout=task.get("timeout", a.timeout),
+                          on_stdout_line=tracker.on_line if tracker is not None else None)
         seconds = proc["seconds"]
         if proc.get("timed_out"):
             return {"ok": False, "error": f"超时（{task.get('timeout', a.timeout)}s）",
                     "seconds": seconds, "usage": {}, "usage_missing": True,
                     "error_kind": "timeout"}
         stdout = proc.get("stdout", "")
-        try:
-            data = json.loads(stdout)
-        except ValueError:
-            err = _security.redact((proc.get("output") or stdout).strip())[-500:] or (
+        data = _live.final_result(stdout)
+        if data is None:
+            err = _security.redact((proc.get("stderr") or stdout or "").strip())[-500:] or (
                 f"退出码 {proc.get('code')}")
             return {"ok": False, "error": err, "seconds": seconds,
                     "error_kind": _error_kind(err), "usage": {}, "usage_missing": True}
@@ -579,6 +584,10 @@ def run_check(task: dict, cwd: Path, result_path: Path) -> dict:
 def run_task(task: dict, shared: str, runner: Runner, out: Path) -> dict:
     a = runner.args
     tid = task["id"]
+    # Live progress; absent in `check`, and only used with a runner that can stream to it.
+    board = getattr(runner, "board", None)
+    if board is not None and "tracker" not in inspect.signature(runner.call).parameters:
+        board = None
     out = Path(out).expanduser().resolve()
     definition_hash = _util.hash_obj(
         {k: v for k, v in task.items() if not str(k).startswith("_")})
@@ -645,12 +654,17 @@ def run_task(task: dict, shared: str, runner: Runner, out: Path) -> dict:
         for i in range(max(a.retries, 0) + 1):
             if i:
                 time.sleep(min(30, 5 * i))   # give a rate limit (429) a moment to clear
+            tracker = board.begin(tid, what, m, rec["rounds"]) if board else None
             try:
-                res = runner.call(prompt, task, preset, m)
+                res = runner.call(prompt, task, preset, m,
+                                  **({"tracker": tracker} if tracker else {}))
             except Exception as exc:
                 res = {"ok": False, "error": f"{type(exc).__name__}: {exc}",
                        "seconds": 0.0, "usage": {}, "usage_missing": True,
                        "error_kind": "unknown"}
+            finally:
+                if tracker:
+                    tracker.close(res)
             spend(res, m)
             if res["ok"]:
                 return res
@@ -714,6 +728,8 @@ def run_task(task: dict, shared: str, runner: Runner, out: Path) -> dict:
                       "fix_instructions": f"把正文压到 {limit} 字以内：删掉重复和解释，保留结论和关键步骤。"}
         elif has_check(task):
             log(f"[{tid}] 第 {rnd} 轮：运行检查命令")
+            if board:
+                board.note(tid, "运行检查命令")
             ck = run_check(task, cwd, result_path)
             rec["check"] = {k: ck[k] for k in ("pass", "exit", "seconds")}
             if not ck["pass"]:
@@ -772,6 +788,8 @@ def run_task(task: dict, shared: str, runner: Runner, out: Path) -> dict:
         rec["cost_known"] = False
     log(f"[{tid}] 结束：{rec['status']}，{rec['rounds']} 轮，"
         f"约 ${rec['cost_usd']:.4f}" + ("（部分费用未知）" if not rec["cost_known"] else ""))
+    if board:
+        board.task_done(tid, rec["status"])
     return rec
 
 
@@ -1060,6 +1078,13 @@ def cmd_run(args) -> int:
     done = {i: r for i, r in old.items()
             if i not in run_ids and (r["status"] not in USABLE or (out / f"{i}.md").exists())}
     runner = Runner(args)
+    every = getattr(args, "progress_every", 15)
+    runner.board = _live.LiveBoard(
+        out, title=Path(args.tasks).stem, echo=log, echo_every=every,
+        price=lambda usage, m: estimate_cost(usage, m, dt.datetime.now(dt.timezone.utc)))
+    runner.board.register(t["id"] for t in tasks)
+    log(f"实时进度：{out / _live.LIVE_DIR / _live.PAGE_FILE}"
+        f"（或运行 swarm.py watch {out}）")
 
     reviewed = sum(1 for t in tasks if args.review and t.get("review", True) and t.get("acceptance"))
     checked = sum(1 for t in tasks if t.get("check_cmd") or t.get("check_argv"))
@@ -1079,6 +1104,9 @@ def cmd_run(args) -> int:
                 done[t["id"]] = blocked_record(t["id"], "批次异常终止", t)
                 done[t["id"]]["status"] = "failed"
                 done[t["id"]]["error"] = fatal
+    for i in run_ids:                 # blocked tasks never reached run_task
+        runner.board.task_done(i, done[i]["status"])
+    runner.board.finish()
 
     old.update({i: done[i] for i in run_ids})
     merged = sorted(old.values(), key=lambda r: all_ids.index(r["id"]) if r["id"] in all_ids else len(all_ids))
@@ -1183,6 +1211,12 @@ def cmd_check(args) -> int:
     return 0 if res["ok"] else 1
 
 
+def cmd_watch(args) -> int:
+    if args.serve:
+        return _live.serve(args.path, port=args.port, open_window=args.open)
+    return _live.watch(args.path, once=args.once, interval=args.interval, thinking=args.thinking)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description="One-shot DeepSeek-backed worker runner for a fixed task list. "
@@ -1228,7 +1262,23 @@ def main() -> int:
     r.add_argument("--only", help="comma-separated task ids to (re)run")
     r.add_argument("--keep-sessions", action="store_true",
                    help="save worker sessions so they show up in /resume")
+    r.add_argument("--progress-every", type=float, default=15,
+                   help="seconds between progress lines on stderr; 0 turns them off (default: 15). "
+                        "The live page and status file are written regardless")
     r.set_defaults(func=cmd_run)
+
+    w = sub.add_parser("watch", help="show live progress: thinking, current step, cost so far")
+    w.add_argument("path", help="results folder, tasks file, or a swarm_loop run folder")
+    w.add_argument("--once", action="store_true",
+                   help="print one snapshot and exit (for an agent to relay)")
+    w.add_argument("--thinking", action="store_true",
+                   help="also show the last thing each running worker thought or wrote")
+    w.add_argument("--interval", type=float, default=2.0, help="refresh interval in seconds")
+    w.add_argument("--serve", action="store_true",
+                   help="serve the live page on 127.0.0.1 (for browser panes that cannot open local files)")
+    w.add_argument("--port", type=int, default=8765, help="port for --serve (default: 8765)")
+    w.add_argument("--open", action="store_true", help="with --serve: open the page in a browser window")
+    w.set_defaults(func=cmd_watch)
 
     args = ap.parse_args()
     return args.func(args)
